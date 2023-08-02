@@ -282,6 +282,7 @@ private:
   std::vector<void *> ArgList_;
 
   hipKernelNodeParams Params_;
+  std::vector<void*> KernelArgs_;
   chipstar::ExecItem *ExecItem_;
   chipstar::Kernel *Kernel_;
 

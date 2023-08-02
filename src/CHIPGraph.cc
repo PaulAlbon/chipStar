@@ -159,6 +159,11 @@ GraphNodeKernel::GraphNodeKernel(const hipKernelNodeParams *TheParams)
   if (!Kernel_)
     CHIPERR_LOG_AND_THROW("Could not find requested kernel",
                           hipErrorInvalidDeviceFunction);
+  unsigned NumArgs = Kernel_->getFuncInfo()->getNumClientArgs();
+  KernelArgs_.resize(NumArgs);
+  std::memcpy(KernelArgs_.data(), TheParams->kernelParams, sizeof(void*) * NumArgs);
+  Params_.kernelParams = KernelArgs_.data();
+
   ExecItem_ = ::Backend->createExecItem(Params_.gridDim, Params_.blockDim,
                                         Params_.sharedMemBytes, nullptr);
   ExecItem_->setKernel(Kernel_);
@@ -176,9 +181,16 @@ GraphNodeKernel::GraphNodeKernel(const void *HostFunction, dim3 GridDim,
   auto Dev = ::Backend->getActiveDevice();
 
   Kernel_ = Dev->findKernel(HostPtr(Params_.func));
+
   if (!Kernel_)
     CHIPERR_LOG_AND_THROW("Could not find requested kernel",
                           hipErrorInvalidDeviceFunction);
+
+  unsigned NumArgs = Kernel_->getFuncInfo()->getNumClientArgs();
+  KernelArgs_.resize(NumArgs);
+  std::memcpy(KernelArgs_.data(), Args, sizeof(void*) * NumArgs);
+  Params_.kernelParams = KernelArgs_.data();
+
   ExecItem_ = ::Backend->createExecItem(GridDim, BlockDim, SharedMem, nullptr);
   ExecItem_->setKernel(Kernel_);
 }
