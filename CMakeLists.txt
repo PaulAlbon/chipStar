@@ -243,6 +243,7 @@ option(CHIP_BUILD_HIPFFT "When enabled, hipFFT will be built and installed along
 option(CHIP_BUILD_HIPSOLVER "When enabled, hipSOLVER will be built and installed along chipStar" OFF)
 option(CATCH2_DISCOVER_TESTS_COMPILE_TIME "Discover the tests at compile time" ON)
 option(CHIP_SKIP_TESTS_WITH_DOUBLES "Skip tests where kernels use doubles." OFF)
+option(CHIP_BUILD_HECBENCH "Enable HeCBench benchmarks" ON)
 
 # This mitigation might be necessary on some systems with an older runtime. 
 # This mitigation makes memory resident (disable swapping) on the GPU
@@ -831,6 +832,20 @@ if(CHIP_BUILD_TESTS)
     add_subdirectory(HIP/tests/catch catch)
   endif()
   add_subdirectory(tests)
+endif()
+
+add_custom_target(build_benchmarks)
+
+set(ENV{PATH} "${CMAKE_BINARY_DIR}/build/bin:$ENV{PATH}")
+
+if(CHIP_BUILD_HECBENCH)
+    add_dependencies(build_benchmarks include_hecbench)
+    add_subdirectory(tests/HeCBench EXCLUDE_FROM_ALL)
+endif()
+
+if(DEFINED ENV{CHIPSTAR_BUILD_PATH})
+  list(APPEND CMAKE_PREFIX_PATH "$ENV{CHIPSTAR_BUILD_PATH}")
+  set(ENV{PATH} "$ENV{CHIPSTAR_BUILD_PATH}:$ENV{PATH}")
 endif()
 
 if(CHIP_BUILD_SAMPLES)
