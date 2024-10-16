@@ -22,6 +22,7 @@
 
 #include "CHIPBackendLevel0.hh"
 #include "Utils.hh"
+#include <chrono>
 
 // Auto-generated header that lives in <build-dir>/bitcode.
 #include "rtdevlib-modules.h"
@@ -392,7 +393,7 @@ bool CHIPEventLevel0::wait() {
            ChipEnvVars.getL0EventTimeout(), (void *)this, Msg, (void *)Event_);
 
   zeStatus = ZE_RESULT_NOT_READY;
-  uint64_t timeout = ChipEnvVars.getL0EventTimeout();
+  uint64_t timeout = ChipEnvVars.getL0EventTimeout() * 1e9;
   auto start_time = std::chrono::high_resolution_clock::now();
 
   while (zeStatus == ZE_RESULT_NOT_READY) {
@@ -468,13 +469,23 @@ float CHIPEventLevel0::getElapsedTime(chipstar::Event *OtherIn) {
   logTrace("CHIPEventLevel0::getElapsedTime()");
   CHIPEventLevel0 *Other = (CHIPEventLevel0 *)OtherIn;
   LOCK(Backend->EventsMtx); // chipstar::Backend::Events_
-  this->updateFinishStatus();
-  Other->updateFinishStatus();
-  if (!this->isFinished() || !Other->isFinished())
-    std::abort();
-  // CHIPERR_LOG_AND_ABORT("One of the events for getElapsedTime() was done
-  // yet",
-  //                       hipErrorNotReady);
+  this->updateFinishStatus(false);
+  Other->updateFinishStatus(false);
+  if (this->getEventStatus() != EVENT_STATUS_RECORDED) {
+    if (Other->getEventStatus() != EVENT_STATUS_RECORDED) {
+      CHIPERR_LOG_AND_THROW("CHIPEventLevel0::getElapsedTime() neither start "
+                            "nor stop event is recorded",
+                            hipErrorNotReady);
+    } else {
+      CHIPERR_LOG_AND_THROW(
+          "CHIPEventLevel0::getElapsedTime() this(start) event is not recorded",
+          hipErrorNotReady);
+    }
+  } else if (Other->getEventStatus() != EVENT_STATUS_RECORDED) {
+    CHIPERR_LOG_AND_THROW(
+        "CHIPEventLevel0::getElapsedTime() other(stop) event is not recorded",
+        hipErrorNotReady);
+  }
 
   uint32_t Started = this->getFinishTime();
   uint32_t Finished = Other->getFinishTime();
@@ -1456,14 +1467,37 @@ CHIPQueueLevel0::memCopyAsyncImpl(void *Dst, const void *Src, size_t Size,
 }
 
 void CHIPQueueLevel0::finish() {
-  auto LastEvent = getLastEvent();
+  LOCK(LastEventMtx); // Queue::LastEvent_
+  auto LastEvent = getLastEventNoLock();
   if (LastEvent)
     LastEvent->wait();
 
-  zeStatus =
-      zeCommandQueueSynchronize(ZeCmdQ_, ChipEnvVars.getL0EventTimeout());
-  CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeCommandQueueSynchronize,
-                                    "zeCommandQueueSynchronize timeout out");
+  if (ZeFenceLast_) {
+    auto BackendLz = static_cast<CHIPBackendLevel0 *>(Backend);
+    LOCK(BackendLz->EventsMtx);
+    LOCK(BackendLz->ActiveCmdListsMtx);
+    auto it = std::find_if(BackendLz->ActiveCmdLists.begin(),
+                           BackendLz->ActiveCmdLists.end(),
+                           [this](const auto &CmdList) {
+                             return CmdList->getFence() == ZeFenceLast_;
+                           });
+
+    if (it != BackendLz->ActiveCmdLists.end()) {
+      (*it)->wait();
+      BackendLz->ActiveCmdLists.erase(it);
+      return;
+    }
+
+    ZeFenceLast_ = nullptr;
+  }
+
+  if (zeCmdQOwnership_) {
+    zeStatus = zeCommandQueueSynchronize(ZeCmdQ_,
+                                         ChipEnvVars.getL0EventTimeout() * 1e9);
+    CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeCommandQueueSynchronize,
+                                      "zeCommandQueueSynchronize timeout out");
+  }
+
   this->LastEvent_ = nullptr;
   return;
 }
@@ -1471,7 +1505,11 @@ void CHIPQueueLevel0::finish() {
 void CHIPQueueLevel0::executeCommandList(
     Borrowed<FencedCmdList> &CmdList, std::shared_ptr<chipstar::Event> Event) {
   updateLastEvent(Event);
-  CmdList->execute(getCmdQueue());
+
+  CmdList->execute(getCmdQueue()); // creates fence
+  ZeFenceLast_ = CmdList->getFence();
+  assert(ZeFenceLast_ && "Fence pointer is null");
+
   auto BackendLz = static_cast<CHIPBackendLevel0 *>(Backend);
   LOCK(BackendLz->ActiveCmdListsMtx);
   BackendLz->ActiveCmdLists.push_back(std::move(CmdList));
@@ -1609,6 +1647,7 @@ void CHIPBackendLevel0::uninitialize() {
     EventMonitor_->Stop = true;
   }
   EventMonitor_->join();
+  ActiveCmdLists.clear();
   return;
 }
 
@@ -1811,6 +1850,9 @@ CHIPContextLevel0::~CHIPContextLevel0() {
 
   // delete all devicesA
   delete static_cast<CHIPDeviceLevel0 *>(ChipDevice_);
+
+  while (!this->FencedCmdListsPool_.empty())
+    this->FencedCmdListsPool_.pop();
 
   // The application must not call this function from
   // simultaneous threads with the same context handle.
@@ -2342,7 +2384,13 @@ static ze_module_handle_t compileIL(ze_context_handle_t ZeCtx,
 
   ze_module_build_log_handle_t Log;
   ze_module_handle_t Object;
+
+  auto start = std::chrono::high_resolution_clock::now();
   zeStatus = zeModuleCreate(ZeCtx, ZeDev, &ModuleDesc, &Object, &Log);
+  auto end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double, std::milli> duration = end - start;
+
+  logTrace("zeModuleCreate took {} ms", duration.count());
 
   if (zeStatus != ZE_RESULT_SUCCESS)
     dumpBuildLog(std::move(Log));
@@ -2421,7 +2469,12 @@ void CHIPModuleLevel0::compile(chipstar::Device *ChipDev) {
                                  0, nullptr, nullptr, nullptr};
 
   auto *ChipCtxLz = static_cast<CHIPContextLevel0 *>(ChipDev->getContext());
+  auto start = std::chrono::high_resolution_clock::now();
   ZeModule_ = compileIL(ChipCtxLz->get(), LzDev->get(), ModuleDesc);
+  auto end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double, std::milli> duration = end - start;
+
+  logTrace("Module compilation took {} ms", duration.count());
 
   uint32_t KernelCount = 0;
   zeStatus = zeModuleGetKernelNames(ZeModule_, &KernelCount, nullptr);
@@ -2433,6 +2486,8 @@ void CHIPModuleLevel0::compile(chipstar::Device *ChipDev) {
   CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeModuleGetKernelNames);
   for (auto &Kernel : KernelNames)
     logTrace("Kernel {}", Kernel);
+
+  auto kernelCreationStart = std::chrono::high_resolution_clock::now();
   for (uint32_t i = 0; i < KernelCount; i++) {
     std::string HostFName = KernelNames[i];
     logTrace("Registering kernel {}", HostFName);
@@ -2459,13 +2514,26 @@ void CHIPModuleLevel0::compile(chipstar::Device *ChipDev) {
       //       indirectly. This requires kernel code inspection.
       KernelDesc.flags |= ZE_KERNEL_FLAG_FORCE_RESIDENCY;
 
+    auto kernelStart = std::chrono::high_resolution_clock::now();
     zeStatus = zeKernelCreate(ZeModule_, &KernelDesc, &ZeKernel);
+    auto kernelEnd = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> kernelDuration =
+        kernelEnd - kernelStart;
+
+    logTrace("zeKernelCreate for kernel {} took {} ms", HostFName,
+             kernelDuration.count());
+
     CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeKernelCreate);
     logTrace("LZ KERNEL CREATION via calling zeKernelCreate {} ", zeStatus);
     CHIPKernelLevel0 *ChipZeKernel =
         new CHIPKernelLevel0(ZeKernel, LzDev, HostFName, FuncInfo, this);
     addKernel(ChipZeKernel);
   }
+  auto kernelCreationEnd = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double, std::milli> kernelCreationDuration =
+      kernelCreationEnd - kernelCreationStart;
+
+  logTrace("Total kernel creation took {} ms", kernelCreationDuration.count());
 }
 
 void CHIPExecItemLevel0::setupAllArgs() {
