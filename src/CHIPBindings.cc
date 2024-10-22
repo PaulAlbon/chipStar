@@ -839,9 +839,6 @@ hipError_t hipUserObjectCreate(hipUserObject_t *object_out, void *ptr,
   if(!object_out)
     RETURN(hipErrorInvalidValue);
 
-  if(!ptr)
-    RETURN(hipErrorInvalidValue);
-
   if(!destroy)
     RETURN(hipErrorInvalidValue);
 
@@ -2763,12 +2760,8 @@ hipError_t hipSetDevice(int DeviceId) {
   LOCK(ApiMtx);
   CHIPInitialize();
 
-  //ERROR_CHECK_DEVNUM(DeviceId);
-
-  //Check for valid device id
-  if(DeviceId < 0 || DeviceId >= Backend->getNumDevices()){
+  if(DeviceId < 0 || DeviceId >= Backend->getNumDevices())
     RETURN(hipErrorInvalidDevice);
-  }
 
   chipstar::Device *SelectedDevice = Backend->getDevices()[DeviceId];
   Backend->setActiveDevice(SelectedDevice);
