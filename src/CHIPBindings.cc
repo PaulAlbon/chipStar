@@ -683,7 +683,7 @@ hipError_t hipDeviceGetMemPool(hipMemPool_t *mem_pool, int device) {
   LOCK(ApiMtx);
   CHIPInitialize();
 
-  if (mem_pool)
+  if (!mem_pool)
     RETURN(hipErrorInvalidValue);
 
   if (device < 0 || device >= Backend->getNumDevices())
@@ -4375,7 +4375,7 @@ hipError_t hipMalloc3D(hipPitchedPtr *PitchedDevPtr, hipExtent Extent) {
   LOCK(ApiMtx);
   CHIPInitialize();
 
-  if(PitchedDevPtr)
+  if(!PitchedDevPtr)
     RETURN(hipErrorInvalidValue);
 
   //ERROR_IF((Extent.width == 0 || Extent.height == 0), hipErrorInvalidValue);
