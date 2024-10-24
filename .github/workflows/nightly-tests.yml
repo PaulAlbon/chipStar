@@ -1,0 +1,25 @@
+name: Nightly Tests Intel GPUs
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests-llvm-19-release:
+    runs-on: [self-hosted, X64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          submodules: 'recursive'
+
+      - name: Run Intel GPU Unit Tests
+        shell: bash
+        run: |
+          cp -r /space/chipStar/build ./ && ./scripts/unit_tests.sh release llvm-19 --skip-build --num-tries 10

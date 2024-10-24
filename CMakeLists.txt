@@ -23,12 +23,34 @@
 #
 # =============================================================================
 
+execute_process(
+  COMMAND uname -m
+  OUTPUT_VARIABLE DETECTED_ARCHITECTURE
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+message(STATUS "Detected architecture: ${DETECTED_ARCHITECTURE}")
+
 # temporary
 add_compile_options(-Wno-format-extra-args)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-duplicate-decl-specifier \
 -Wno-tautological-constant-compare  -Wno-c++20-extensions -Wno-unused-result \
 -Wno-delete-abstract-non-virtual-dtor -Wno-deprecated-declarations -Wunused-command-line-argument -gdwarf-4")
+
+# Find GCC installation path
+execute_process(
+  COMMAND which gcc
+  OUTPUT_VARIABLE GCC_PATH
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# Extract the base path (removing /bin/gcc from the end)
+get_filename_component(GCC_BASE_PATH ${GCC_PATH} DIRECTORY)
+get_filename_component(GCC_BASE_PATH ${GCC_BASE_PATH} DIRECTORY)
+
+message(STATUS "GCC base path: ${GCC_BASE_PATH}")
+# Necessary on some systems with nonstandard GCC installations
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --gcc-toolchain=${GCC_BASE_PATH}")
 
 # end temporary
 cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
@@ -207,7 +229,7 @@ option(CHIP_ERROR_IF_NOT_IMPLEMENTED "Some HIP functionality is not yet implemen
 option(CHIP_VERBOSE "Verbose compilation" OFF)
 option(CHIP_BUILD_SHARED_LIBS "Build chipStar as a shared library" ON)
 option(CHIP_BUILD_DOCS "Build doxygen documentation" OFF)
-option(CHIP_LLVM_USE_INTERGRATED_SPIRV "Use LLVM's intergrated SPIR-V backend for emitting device binary instead of SPIR-V translator. Requires LLVM 15" OFF)
+option(CHIP_LLVM_USE_INTERGRATED_SPIRV "Use LLVM's intergrated SPIR-V backend for emitting device binary instead of SPIR-V translator. Requires Clang with patch at https://github.com/CHIP-SPV/llvm-project/commit/8e7d42c1562f9961e5c8cdeef6490e0670b27409" OFF)
 option(CHIP_SET_RPATH "Add CMAKE_INSTALL_PREFIX/lib to the RPATH for chipStar executables" ON)
 option(CHIP_ENABLE_UNCOMPILABLE_TESTS "Enable tests which are known to not compile" OFF)
 option(CHIP_BUILD_TESTS "Enable build_tests target" ON)
@@ -218,6 +240,7 @@ option(CHIP_FAST_MATH "Use native_ OpenCL functions which are fast but their pre
 option(CHIP_USE_INTEL_USM "When enabled, cl_intel_unified_shared_memory extension, when available, will be used for HIP allocations in the OpenCL backend" ON)
 option(CHIP_BUILD_HIPBLAS "When enabled, hipBLAS will be built and installed along chipStar" OFF)
 option(CHIP_BUILD_HIPFFT "When enabled, hipFFT will be built and installed along chipStar" OFF)
+option(CHIP_BUILD_HIPSOLVER "When enabled, hipSOLVER will be built and installed along chipStar" OFF)
 option(CATCH2_DISCOVER_TESTS_COMPILE_TIME "Discover the tests at compile time" ON)
 option(CHIP_SKIP_TESTS_WITH_DOUBLES "Skip tests where kernels use doubles." OFF)
 
@@ -316,9 +339,9 @@ endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_options(-Wall)
-  list(APPEND CHIP_SPV_DEFINITIONS SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
+  set(SPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_TRACE)
 else()
-  list(APPEND CHIP_SPV_DEFINITIONS SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO)
+  set(SPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_INFO)
 endif()
 
 if(CHIP_BUILD_SHARED_LIBS)
@@ -355,12 +378,12 @@ endif()
 set(CHIP_INTERFACE_LIBS ${PTHREAD_LIBRARY})
 
 if(OpenCL_LIBRARY)
-  list(APPEND CHIP_SPV_DEFINITIONS HAVE_OPENCL)
+  set(HAVE_OPENCL 1)
   list(PREPEND CHIP_INTERFACE_LIBS ${OpenCL_LIBRARY})
 endif()
 
 if(LevelZero_LIBRARY)
-  list(APPEND CHIP_SPV_DEFINITIONS HAVE_LEVEL0)
+  set(HAVE_LEVEL0 1)
   list(PREPEND CHIP_INTERFACE_LIBS ${LevelZero_LIBRARY})
 endif()
 
@@ -749,8 +772,8 @@ install(FILES ${PROJECT_BINARY_DIR}/share/.hipInfo_install
   DESTINATION ${SHARE_INSTALL_DIR} RENAME .hipInfo)
 
 # Copy hipconfig, hipvars, etc to bin
-install(FILES ${CMAKE_BINARY_DIR}/bin/hipcc.bin DESTINATION ${BIN_INSTALL_DIR} RENAME hipcc PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ)
-install(FILES ${CMAKE_BINARY_DIR}/bin/hipconfig.bin DESTINATION ${BIN_INSTALL_DIR} RENAME hipconfig PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ)
+install(FILES ${CMAKE_BINARY_DIR}/bin/hipcc.bin DESTINATION ${BIN_INSTALL_DIR} RENAME hipcc PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ)
+install(FILES ${CMAKE_BINARY_DIR}/bin/hipconfig.bin DESTINATION ${BIN_INSTALL_DIR} RENAME hipconfig PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ)
 
 set(CHIP_CMAKE_INSTALL_LIBDIR ${CMAKE_INSTALL_LIBDIR})
 set(CHIP_CMAKE_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR})
@@ -777,7 +800,7 @@ install(EXPORT CHIPTargets
 # enable the build_tests target
 SET(HIP_PATH ${CMAKE_BINARY_DIR}) # pick up build sources, not install sources
 
-if (CHIP_BUILD_HIPBLAS OR CHIP_BUILD_HIPFFT)
+if (CHIP_BUILD_HIPBLAS OR CHIP_BUILD_HIPFFT OR CHIP_BUILD_HIPSOLVER)
   add_subdirectory(H4I-MKLShim)
   add_dependencies(MKLShim CHIP)
 endif()
@@ -792,6 +815,11 @@ if (CHIP_BUILD_HIPFFT)
   # for picking up hip_version.h
   target_include_directories(hipfft PUBLIC ${CMAKE_BINARY_DIR}/include)
   add_dependencies(hipfft CHIP MKLShim)
+endif()
+
+if (CHIP_BUILD_HIPSOLVER)
+  add_subdirectory(H4I-HipSOLVER)
+  add_dependencies(hipsolver CHIP MKLShim)
 endif()
 
 set(SAVED_WARN_DEPRECATED ${CMAKE_WARN_DEPRECATED})

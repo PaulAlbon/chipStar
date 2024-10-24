@@ -177,13 +177,18 @@ void chipstar::AllocationTracker::recordAllocation(
   AllocInfos_.insert(AllocInfo);
 
   if (DevPtr) {
-    assert(!PtrToAllocInfo_.count(DevPtr) &&
-           "Device pointer already recorded!");
-    PtrToAllocInfo_[DevPtr] = AllocInfo;
+    if (!PtrToAllocInfo_.count(DevPtr))
+      PtrToAllocInfo_[DevPtr] = AllocInfo;
+    else
+      CHIPERR_LOG_AND_ABORT("Device pointer already recorded: 0x" +
+                            std::to_string((uintptr_t)DevPtr));
   }
   if (HostPtr) {
-    assert(!PtrToAllocInfo_.count(DevPtr) && "Host pointer already recorded!");
-    PtrToAllocInfo_[HostPtr] = AllocInfo;
+    if (!PtrToAllocInfo_.count(HostPtr))
+      PtrToAllocInfo_[HostPtr] = AllocInfo;
+    else
+      CHIPERR_LOG_AND_ABORT("Host pointer already recorded: 0x" +
+                            std::to_string((uintptr_t)HostPtr));
   }
 
   logDebug("chipstar::AllocationTracker::recordAllocation size: {} HOST {} DEV "
@@ -423,7 +428,7 @@ SPVFuncInfo *chipstar::Module::findFunctionInfo(const std::string &FName) {
 //*************************************************************************************
 chipstar::Kernel::Kernel(std::string HostFName, SPVFuncInfo *FuncInfo)
     : HostFName_(HostFName), FuncInfo_(FuncInfo) {}
-chipstar::Kernel::~Kernel(){};
+chipstar::Kernel::~Kernel() {};
 std::string chipstar::Kernel::getName() { return HostFName_; }
 const void *chipstar::Kernel::getHostPtr() { return HostFPtr_; }
 const void *chipstar::Kernel::getDevPtr() { return DevFPtr_; }
@@ -483,7 +488,7 @@ void *chipstar::ArgSpillBuffer ::allocate(const SPVFuncInfo::Arg &Arg) {
 chipstar::ExecItem::ExecItem(dim3 GridDim, dim3 BlockDim, size_t SharedMem,
                              hipStream_t ChipQueue)
     : SharedMem_(SharedMem), GridDim_(GridDim), BlockDim_(BlockDim),
-      ChipQueue_(static_cast<chipstar::Queue *>(ChipQueue)){};
+      ChipQueue_(static_cast<chipstar::Queue *>(ChipQueue)) {};
 
 dim3 chipstar::ExecItem::getBlock() { return BlockDim_; }
 dim3 chipstar::ExecItem::getGrid() { return GridDim_; }
@@ -802,6 +807,9 @@ int chipstar::Device::getAttr(hipDeviceAttribute_t Attr) const {
   case hipDeviceAttributeUnifiedAddressing:
     return Prop.unifiedAddressing;
     break;
+  case hipDeviceAttributeMemoryPoolsSupported:
+    return Prop.memoryPoolsSupported;
+    break;
   default:
     CHIPERR_LOG_AND_THROW("Device::getAttr asked for an unkown attribute",
                           hipErrorInvalidValue);
@@ -1039,7 +1047,12 @@ chipstar::Module *chipstar::Device::getOrCreateModule(const SPVModule &SrcMod) {
 
   logDebug("Compile module {}", static_cast<const void *>(&SrcMod));
 
+  auto start = std::chrono::high_resolution_clock::now();
   auto *Module = compile(SrcMod);
+  auto end = std::chrono::high_resolution_clock::now();
+  auto duration =
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+  logInfo("Module compilation took {} microseconds", duration.count());
   if (!Module) { // Probably a compile error.
     logWarn("Compile module returned NULL, probably error");
     return nullptr;
@@ -1451,7 +1464,7 @@ chipstar::Queue *chipstar::Backend::findQueue(chipstar::Queue *ChipQueue) {
     CHIPERR_LOG_AND_THROW("Backend::findQueue() was given a non-nullptr "
                           "queue but this queue "
                           "was not found among the backend queues.",
-                          hipErrorTbd);
+                          hipErrorContextIsDestroyed);
   return *QueueFound;
 }
 
@@ -1465,7 +1478,7 @@ chipstar::Queue::Queue(chipstar::Device *ChipDevice, chipstar::QueueFlags Flags,
 };
 
 chipstar::Queue::Queue(chipstar::Device *ChipDevice, chipstar::QueueFlags Flags)
-    : Queue(ChipDevice, Flags, 0){};
+    : Queue(ChipDevice, Flags, 0) {};
 
 chipstar::Queue::~Queue() {
   updateLastEvent(nullptr);
