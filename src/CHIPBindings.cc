@@ -4705,6 +4705,10 @@ hipError_t hipMemset3DAsync(hipPitchedPtr PitchedDevPtr, int Value,
   if(!Stream)
     RETURN(hipErrorInvalidValue);
 
+  if (Extent.height > PitchedDevPtr.ysize ||
+      Extent.width > PitchedDevPtr.xsize || Extent.depth > PitchedDevPtr.pitch)
+      RETURN(hipErrorInvalidValue);
+
   RETURN(hipMemset3DAsyncInternal(PitchedDevPtr, Value, Extent, Stream));
   CHIP_CATCH
 }
@@ -4717,6 +4721,10 @@ hipError_t hipMemset3D(hipPitchedPtr PitchedDevPtr, int Value,
 
   if(!PitchedDevPtr.ptr)
     RETURN(hipErrorInvalidValue);
+
+  if (Extent.height > PitchedDevPtr.ysize ||
+      Extent.width > PitchedDevPtr.xsize || Extent.depth > PitchedDevPtr.pitch)
+      RETURN(hipErrorInvalidValue);
 
   auto ChipQueue = Backend->getActiveDevice()->getDefaultQueue();
   auto Res = hipMemset3DAsyncInternal(PitchedDevPtr, Value, Extent, ChipQueue);
