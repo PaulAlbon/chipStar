@@ -363,7 +363,10 @@ ANY:
     Unit_hipTextureObj2DCheckRGBAModes: 'Failed'
     hipMemset_Unit_hipMemsetAsync_SetMemoryWithOffset_Helgrind: 'Failed'
   OPENCL_GPU:
+    hipKernelLaunchIsNonBlocking: ''
     Unit_hipEvent: 'calling hipEventGetElapsed time on (start, start) and (stop, stop) causes subsequent call to be ready instread of hipErrorNotReady'
+    Unit_hipMemset_Negative_OutOfBoundsSize: ''
+    Unit_hipMemset_Negative_OutOfBoundsPtr: ''
   OPENCL_POCL:
     Unit_ballot: ''
     BinomialOption: ''
