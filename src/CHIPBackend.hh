@@ -1278,6 +1278,7 @@ public:
    *
    */
   virtual void setupAllArgs() = 0;
+  virtual void copyArgs(void** args) = 0;
 
   std::shared_ptr<chipstar::ArgSpillBuffer> getArgSpillBuffer() const {
     return ArgSpillBuffer_;

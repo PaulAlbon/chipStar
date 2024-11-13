@@ -39,7 +39,7 @@
 #define CL_HPP_TARGET_OPENCL_VERSION 210
 #define CL_HPP_MINIMUM_OPENCL_VERSION 200
 
-#include <CL/opencl.h>
+#include <CL/cl_ext.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-braces"
@@ -202,6 +202,9 @@ public:
   bool hasPointer(const void *Ptr);
   bool pointerSize(void *Ptr, size_t *Size);
   bool pointerInfo(void *Ptr, void **Base, size_t *Size);
+  int memCopy(void *Dst, const void *Src, size_t Size, cl::CommandQueue &Queue);
+  int memFill(void *Dst, size_t Size, const void *Pattern, size_t PatternSize,
+              cl::CommandQueue &Queue);
   void clear();
 
   size_t getNumAllocations() const { return Allocations_.size(); }
@@ -231,56 +234,61 @@ private:
                                               hipMemoryType MemType);
 };
 
-typedef struct {
-  clCreateCommandBufferKHR_fn clCreateCommandBufferKHR;
-  clCommandCopyBufferKHR_fn clCommandCopyBufferKHR;
-  clCommandCopyBufferRectKHR_fn clCommandCopyBufferRectKHR;
-  clCommandFillBufferKHR_fn clCommandFillBufferKHR;
-  clCommandNDRangeKernelKHR_fn clCommandNDRangeKernelKHR;
-  clCommandBarrierWithWaitListKHR_fn clCommandBarrierWithWaitListKHR;
-  clFinalizeCommandBufferKHR_fn clFinalizeCommandBufferKHR;
-  clEnqueueCommandBufferKHR_fn clEnqueueCommandBufferKHR;
-  clReleaseCommandBufferKHR_fn clReleaseCommandBufferKHR;
-  clGetCommandBufferInfoKHR_fn clGetCommandBufferInfoKHR;
-
-#ifdef cl_pocl_command_buffer_svm
-  clCommandSVMMemcpyPOCL_fn clCommandSVMMemcpyPOCL;
-  clCommandSVMMemcpyRectPOCL_fn clCommandSVMMemcpyRectPOCL;
-  clCommandSVMMemfillPOCL_fn clCommandSVMMemfillPOCL;
-  clCommandSVMMemfillRectPOCL_fn clCommandSVMMemfillRectPOCL;
-#endif
-
-#ifdef cl_pocl_command_buffer_host_exec
-  clCommandHostFuncPOCL_fn clCommandHostFuncPOCL;
-  clCommandWaitForEventPOCL_fn clCommandWaitForEventPOCL;
-  clCommandSignalEventPOCL_fn clCommandSignalEventPOCL;
-#endif
-
-} CHIPContextClExts;
-
 class CHIPContextOpenCL : public chipstar::Context {
-  cl::Context *ClContext_;
-  bool SupportsCommandBuffers;
-  bool SupportsCommandBuffersSVM;
-  bool SupportsCommandBuffersHost;
+private:
+  cl::Platform Platform_;
+  cl::Context ClContext;
+  mutable clSetKernelArgDevicePointerEXT_fn clSetKernelArgDevicePointerEXT_ =
+      nullptr;
 
 public:
-  CHIPContextClExts Exts_;
-  SVMemoryRegion SvmMemory;
-  bool allDevicesSupportFineGrainSVM();
-  CHIPContextOpenCL(cl::Context *ClContext, cl::Device Dev, cl::Platform Plat);
-  virtual ~CHIPContextOpenCL() {}
+  MemoryManager MemManager_;
+  bool allDevicesSupportFineGrainSVMorUSM();
+  CHIPContextOpenCL(cl::Context CtxIn, cl::Device Dev, cl::Platform Plat);
+  virtual ~CHIPContextOpenCL() {
+    logTrace("CHIPContextOpenCL::~CHIPContextOpenCL");
+    MemManager_.clear();
+    delete ChipDevice_;
+  }
   void *allocateImpl(
       size_t Size, size_t Alignment, hipMemoryType MemType,
       chipstar::HostAllocFlags Flags = chipstar::HostAllocFlags()) override;
 
   bool isAllocatedPtrMappedToVM(void *Ptr) override { return false; } // TODO
   virtual void freeImpl(void *Ptr) override;
-  cl::Context *get() { return ClContext_; }
-  bool supportsCommandBuffers() { return SupportsCommandBuffers; }
-  bool supportsCommandBuffersSVM() { return SupportsCommandBuffersSVM; }
-  bool supportsCommandBuffersHost() { return SupportsCommandBuffersHost; }
-  const CHIPContextClExts *exts() { return &Exts_; }
+  cl::Context *get();
+
+  size_t getNumAllocations() const { return MemManager_.getNumAllocations(); }
+  IteratorRange<const_alloc_iterator> getAllocPointers() const {
+    return MemManager_.getAllocPointers();
+  }
+
+  AllocationStrategy getAllocStrategy() const noexcept {
+    return MemManager_.getAllocStrategy();
+  }
+
+  cl_int clSetKernelArgDevicePointerEXT(cl_kernel Kernel, cl_uint ArgIdx,
+                                        const void *DevPtr) const {
+    assert(getAllocStrategy() == AllocationStrategy::BufferDevAddr);
+    if (!clSetKernelArgDevicePointerEXT_) {
+      clSetKernelArgDevicePointerEXT_ =
+          reinterpret_cast<clSetKernelArgDevicePointerEXT_fn>(
+              clGetExtensionFunctionAddressForPlatform(
+                  Platform_(), "clSetKernelArgDevicePointerEXT"));
+    }
+    assert(clSetKernelArgDevicePointerEXT_);
+    static_assert(
+        sizeof(cl_mem_device_address_EXT) == sizeof(void *),
+        "sizeof(cl_mem_device_address_EXT) does not match host pointer size!");
+    auto IntPtr = reinterpret_cast<cl_mem_device_address_EXT>(DevPtr);
+    return clSetKernelArgDevicePointerEXT_(Kernel, ArgIdx, IntPtr);
+  }
+
+  std::pair<cl_mem, size_t> translateDevPtrToBuffer(const void *DevPtr) const {
+    return MemManager_.translateDevPtrToBuffer(DevPtr);
+  }
+
+  const cl::Platform &getPlatform() const { return Platform_; }
 };
 
 class CHIPDeviceOpenCL : public chipstar::Device {
@@ -430,7 +438,6 @@ public:
 
   virtual hipError_t getBackendHandles(uintptr_t *NativeInfo,
                                        int *NumHandles) override;
-
   virtual std::shared_ptr<chipstar::Event> enqueueBarrierImpl(
       const std::vector<std::shared_ptr<chipstar::Event>> &EventsToWaitFor)
       override;
@@ -438,10 +445,28 @@ public:
   virtual std::shared_ptr<chipstar::Event>
   memPrefetchImpl(const void *Ptr, size_t Count) override;
 
-  virtual std::shared_ptr<chipstar::Event>
-  enqueueNativeGraph(chipstar::GraphNative *NativeGraph) override;
-  virtual chipstar::GraphNative *createNativeGraph() override;
-  virtual void destroyNativeGraph(chipstar::GraphNative *NativeGraph) override;
+  /// Enqueues a virtual command that deletes the give host array
+  /// after previously enqueud commands have finished.
+  ///
+  /// Precondition: HostPtr must be a valid pointer to a host allocation
+  /// created with new T[].
+  template <typename T> cl_int enqueueDeleteHostArray(T *HostPtr) {
+    assert(HostPtr);
+    cl::Event CallbackEv;
+    clStatus = get()->enqueueMarkerWithWaitList(nullptr, &CallbackEv);
+    if (clStatus != CL_SUCCESS)
+      return clStatus;
+
+    return CallbackEv.setCallback(CL_COMPLETE, deleteArrayCallback<T>,
+                                  reinterpret_cast<void *>(HostPtr));
+  }
+
+  CHIPContextOpenCL *getContext() override {
+    return static_cast<CHIPContextOpenCL *>(ChipContext_);
+  };
+
+private:
+  void switchModeTo(QueueMode Mode);
 };
 
 class CHIPKernelOpenCL : public chipstar::Kernel {
@@ -497,7 +522,7 @@ private:
 
 public:
   CHIPExecItemOpenCL(const CHIPExecItemOpenCL &Other)
-      : chipstar::ExecItem(Other.GridDim_, Other.BlockDim_, Other.SharedMem_,
+      : CHIPExecItemOpenCL(Other.GridDim_, Other.BlockDim_, Other.SharedMem_,
                            Other.ChipQueue_) {
     // TOOD Graphs Is this safe?
 
@@ -515,6 +540,7 @@ public:
 
   virtual ~CHIPExecItemOpenCL() override {}
   virtual void setupAllArgs() override;
+  virtual void copyArgs(void** args) override;
   cl_kernel getKernelHandle();
 
   virtual chipstar::ExecItem *clone() const override {
@@ -580,52 +606,6 @@ public:
 
   cl_mem getImage() const { return Image; }
   cl_sampler getSampler() const { return Sampler; }
-};
-
-class CHIPGraphNativeOpenCL : public chipstar::GraphNative {
-  cl_command_buffer_khr Handle_;
-  cl_command_queue CmdQ_;
-  std::map<chipstar::GraphNode *, cl_sync_point_khr> SyncPointMap_;
-  const CHIPContextClExts *Exts_;
-
-  bool addKernelNode(chipstar::GraphNodeKernel *Node,
-                     std::vector<cl_sync_point_khr> &SyncPointDeps,
-                     cl_sync_point_khr *SyncPoint);
-#ifdef cl_pocl_command_buffer_svm
-  bool addMemcpyNode(chipstar::GraphNodeMemcpy *Node,
-                     std::vector<cl_sync_point_khr> &SyncPointDeps,
-                     cl_sync_point_khr *SyncPoint);
-  bool addMemcpyNode(chipstar::GraphNodeMemcpyFromSymbol *Node,
-                     std::vector<cl_sync_point_khr> &SyncPointDeps,
-                     cl_sync_point_khr *SyncPoint);
-  bool addMemcpyNode(chipstar::GraphNodeMemcpyToSymbol *Node,
-                     std::vector<cl_sync_point_khr> &SyncPointDeps,
-                     cl_sync_point_khr *SyncPoint);
-  bool addMemsetNode(chipstar::GraphNodeMemset *Node,
-                     std::vector<cl_sync_point_khr> &SyncPointDeps,
-                     cl_sync_point_khr *SyncPoint);
-#endif
-
-#ifdef cl_pocl_command_buffer_host_exec
-  bool addHostNode(chipstar::GraphNodeHost *Node,
-                   std::vector<cl_sync_point_khr> &SyncPointDeps,
-                   cl_sync_point_khr *SyncPoint);
-  bool addEventRecordNode(chipstar::GraphNodeEventRecord *Node,
-                          std::vector<cl_sync_point_khr> &SyncPointDeps,
-                          cl_sync_point_khr *SyncPoint);
-  bool addEventWaitNode(chipstar::GraphNodeWaitEvent *Node,
-                        std::vector<cl_sync_point_khr> &SyncPointDeps,
-                        cl_sync_point_khr *SyncPoint);
-#endif
-
-public:
-  CHIPGraphNativeOpenCL(cl_command_buffer_khr H, cl_command_queue CQ,
-                        const CHIPContextClExts *E)
-      : Handle_(H), CmdQ_(CQ), Exts_(E) {}
-  virtual ~CHIPGraphNativeOpenCL();
-  cl_command_buffer_khr get() const { return Handle_; }
-  virtual bool finalize() override;
-  virtual bool addNode(chipstar::GraphNode *NewNode) override;
 };
 
 #endif

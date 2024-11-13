@@ -66,6 +66,7 @@ public:
   virtual ~CHIPExecItemLevel0() override {}
 
   virtual void setupAllArgs() override;
+  virtual void copyArgs(void** args) override;
   virtual chipstar::ExecItem *clone() const override {
     auto NewExecItem = new CHIPExecItemLevel0(*this);
     return NewExecItem;
