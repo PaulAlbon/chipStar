@@ -4703,7 +4703,7 @@ static inline hipError_t hipMemset3DAsyncInternal(hipPitchedPtr PitchedDevPtr,
       /* value */ (unsigned int)Value, /* TODO Graphs - why is the arg for
                                           memset unsigned? */
       /* width */ Extent.width};
-  if (ChipQueue->captureIntoGraph<chipstar::GraphNodeMemset>(Params)) {
+  if (ChipQueue->captureIntoGraph<chipstar::GraphNodeMemset>(Params))
     return hipSuccess;
 
   if (Extent.height * Extent.width * Extent.depth == 0)
@@ -4864,7 +4864,7 @@ hipError_t hipMemsetD8Async(hipDeviceptr_t Dest, unsigned char Value,
       /* value */ (unsigned int)Value, /* TODO Graphs - why is the arg for
                                           memset unsigned? */
       /* width */ Count};
-  if (ChipQueue->captureIntoGraph<chipstar::GraphNodeMemset>(Params)) {
+  if (ChipQueue->captureIntoGraph<chipstar::GraphNodeMemset>(Params))
     RETURN(hipSuccess);
 
   ChipQueue->memFillAsync(Dest, 1 * Count, &Value, 1);
@@ -4906,7 +4906,7 @@ hipError_t hipMemsetD16Async(hipDeviceptr_t Dest, unsigned short Value,
       /* value */ (unsigned int)Value, /* TODO Graphs - why is the arg for
                                           memset unsigned? */
       /* width */ 2 * Count};
-  if (ChipQueue->captureIntoGraph<chipstar::GraphNodeMemset>(Params)) {
+  if (ChipQueue->captureIntoGraph<chipstar::GraphNodeMemset>(Params))
     RETURN(hipSuccess);
 
   ChipQueue->memFillAsync(Dest, 2 * Count, &Value, 2);
@@ -4947,7 +4947,7 @@ hipError_t hipMemsetD32Async(hipDeviceptr_t Dst, int Value, size_t Count,
       /* value */ (unsigned int)Value, /* TODO Graphs - why is the arg for
                                           memset unsigned? */
       /* width */ 4 * Count};
-  if (ChipQueue->captureIntoGraph<chipstar::GraphNodeMemset>(Params)) {
+  if (ChipQueue->captureIntoGraph<chipstar::GraphNodeMemset>(Params))
     RETURN(hipSuccess);
 
   ChipQueue->memFillAsync(Dst, 4 * Count, &Value, 4);

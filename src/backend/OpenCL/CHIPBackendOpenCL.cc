@@ -23,7 +23,6 @@
 #include "CHIPBackendOpenCL.hh"
 #include "Utils.hh"
 
-#include <memory>
 #include <sstream>
 
 #include "Utils.hh"
@@ -521,7 +520,8 @@ void CHIPDeviceOpenCL::populateDevicePropertiesImpl() {
 
   HipDeviceProps_.warpSize = CHIP_DEFAULT_WARP_SIZE;
   // Try to check that we support the default warp size.
-  std::vector<size_t> Sg = ClDevice->getInfo<CL_DEVICE_SUB_GROUP_SIZES_INTEL>();
+  auto TempSg = ClDevice->getInfo<CL_DEVICE_SUB_GROUP_SIZES_INTEL>();
+  std::vector<uint> Sg(TempSg.begin(), TempSg.end());
   if (std::find(Sg.begin(), Sg.end(), CHIP_DEFAULT_WARP_SIZE) == Sg.end()) {
     logWarn(
         "The device might not support subgroup size {}, warp-size sensitive "
@@ -725,14 +725,14 @@ void CHIPQueueOpenCL::recordEvent(chipstar::Event *ChipEvent) {
 
 void CHIPEventOpenCL::recordEventCopy(
     const std::shared_ptr<chipstar::Event> &OtherIn) {
-  logTrace("CHIPEventOpenCL::takeOver");
-  {
-    std::shared_ptr<CHIPEventOpenCL> Other =
-        std::static_pointer_cast<CHIPEventOpenCL>(OtherIn);
-    LOCK(EventMtx); // chipstar::Event::Refc_
-    this->ClEvent = Other.get()->ClEvent;
-    this->Msg = Other.get()->Msg;
-  }
+  logTrace("CHIPEventOpenCL::recordEventCopy");
+  std::shared_ptr<CHIPEventOpenCL> Other =
+      std::static_pointer_cast<CHIPEventOpenCL>(OtherIn);
+  this->ClEvent = Other->ClEvent;
+  this->RecordedEvent = Other;
+  this->Msg = "recordEventCopy: " + Other->Msg;
+  this->HostTimeStamp =
+      std::chrono::high_resolution_clock::now().time_since_epoch().count();
 }
 
 bool CHIPEventOpenCL::wait() {
@@ -1081,85 +1081,11 @@ void CHIPContextOpenCL::freeImpl(void *Ptr) {
   MemManager_.free(Ptr);
 }
 
-CHIPContextOpenCL::CHIPContextOpenCL(cl::Context *CtxIn, cl::Device Dev,
-                                     cl::Platform Plat) {
+cl::Context *CHIPContextOpenCL::get() { return &ClContext; }
+CHIPContextOpenCL::CHIPContextOpenCL(cl::Context CtxIn, cl::Device Dev,
+                                     cl::Platform Plat)
+    : Platform_(Plat), ClContext(CtxIn) {
   logTrace("CHIPContextOpenCL Initialized via OpenCL Context pointer.");
-  std::string DevExts = Dev.getInfo<CL_DEVICE_EXTENSIONS>();
-  std::memset(&Exts_, 0, sizeof(Exts_));
-  SupportsCommandBuffers =
-      DevExts.find("cl_khr_command_buffer") != std::string::npos;
-  if (SupportsCommandBuffers) {
-    logDebug("Device supports cl_khr_command_buffer");
-    Exts_.clCreateCommandBufferKHR =
-        (clCreateCommandBufferKHR_fn)::clGetExtensionFunctionAddressForPlatform(
-            Plat(), "clCreateCommandBufferKHR");
-    Exts_.clCommandCopyBufferKHR =
-        (clCommandCopyBufferKHR_fn)::clGetExtensionFunctionAddressForPlatform(
-            Plat(), "clCommandCopyBufferKHR");
-    Exts_.clCommandCopyBufferRectKHR = (clCommandCopyBufferRectKHR_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clCommandCopyBufferRectKHR");
-    Exts_.clCommandFillBufferKHR =
-        (clCommandFillBufferKHR_fn)::clGetExtensionFunctionAddressForPlatform(
-            Plat(), "clCommandFillBufferKHR");
-    Exts_.clCommandNDRangeKernelKHR = (clCommandNDRangeKernelKHR_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clCommandNDRangeKernelKHR");
-    Exts_.clCommandBarrierWithWaitListKHR =
-        (clCommandBarrierWithWaitListKHR_fn)::
-            clGetExtensionFunctionAddressForPlatform(
-                Plat(), "clCommandBarrierWithWaitListKHR");
-    Exts_.clFinalizeCommandBufferKHR = (clFinalizeCommandBufferKHR_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clFinalizeCommandBufferKHR");
-    Exts_.clEnqueueCommandBufferKHR = (clEnqueueCommandBufferKHR_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clEnqueueCommandBufferKHR");
-    Exts_.clReleaseCommandBufferKHR = (clReleaseCommandBufferKHR_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clReleaseCommandBufferKHR");
-    Exts_.clGetCommandBufferInfoKHR = (clGetCommandBufferInfoKHR_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clGetCommandBufferInfoKHR");
-  }
-#ifdef cl_pocl_command_buffer_svm
-  SupportsCommandBuffersSVM =
-      DevExts.find("cl_pocl_command_buffer_svm") != std::string::npos;
-  if (SupportsCommandBuffersSVM) {
-    logDebug("Device supports cl_pocl_command_buffer_svm");
-    Exts_.clCommandSVMMemcpyPOCL =
-        (clCommandSVMMemcpyPOCL_fn)::clGetExtensionFunctionAddressForPlatform(
-            Plat(), "clCommandSVMMemcpyPOCL");
-    Exts_.clCommandSVMMemcpyRectPOCL = (clCommandSVMMemcpyRectPOCL_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clCommandSVMMemcpyRectPOCL");
-    Exts_.clCommandSVMMemfillPOCL =
-        (clCommandSVMMemfillPOCL_fn)::clGetExtensionFunctionAddressForPlatform(
-            Plat(), "clCommandSVMMemfillPOCL");
-    Exts_.clCommandSVMMemfillRectPOCL = (clCommandSVMMemfillRectPOCL_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clCommandSVMMemfillRectPOCL");
-  }
-#endif
-#ifdef cl_pocl_command_buffer_host_exec
-  SupportsCommandBuffersHost =
-      DevExts.find("cl_pocl_command_buffer_host_exec") != std::string::npos;
-  if (SupportsCommandBuffersHost) {
-    logDebug("Device supports cl_pocl_command_buffer_host_exec");
-    Exts_.clCommandHostFuncPOCL =
-        (clCommandHostFuncPOCL_fn)::clGetExtensionFunctionAddressForPlatform(
-            Plat(), "clCommandHostFuncPOCL");
-    Exts_.clCommandWaitForEventPOCL = (clCommandWaitForEventPOCL_fn)::
-        clGetExtensionFunctionAddressForPlatform(Plat(),
-                                                 "clCommandWaitForEventPOCL");
-    Exts_.clCommandSignalEventPOCL =
-        (clCommandSignalEventPOCL_fn)::clGetExtensionFunctionAddressForPlatform(
-            Plat(), "clCommandSignalEventPOCL");
-  }
-#endif
-
-  ClContext_ = CtxIn;
-  SvmMemory.init(*CtxIn);
 }
 
 void *CHIPContextOpenCL::allocateImpl(size_t Size, size_t Alignment,
@@ -1756,400 +1682,46 @@ std::shared_ptr<chipstar::Event> CHIPQueueOpenCL::enqueueBarrierImpl(
   return Event;
 }
 
-/********************************************************************************/
-
-chipstar::GraphNative *CHIPQueueOpenCL::createNativeGraph() {
-  // should not raise an error if we fail to create a graph,
-  // because there is a fallback solution
-  CHIPContextOpenCL *Ctx = (CHIPContextOpenCL *)ChipContext_;
-  if (!Ctx->supportsCommandBuffers())
-    return nullptr;
-
-  cl_command_queue CQ = ClQueue_->get();
-  int err = CL_SUCCESS;
-  cl_command_buffer_khr Res =
-      Ctx->exts()->clCreateCommandBufferKHR(1, &CQ, 0, &err);
-  if (Res == nullptr || err != CL_SUCCESS) {
-    logError("clCreateCommandBufferKHR FAILED with status {}",
-             resultToString(err));
-    return nullptr;
-  }
-
-  return new CHIPGraphNativeOpenCL(Res, CQ, Ctx->exts());
-}
-
-std::shared_ptr<chipstar::Event>
-CHIPQueueOpenCL::enqueueNativeGraph(chipstar::GraphNative *NativeGraph) {
-
-  std::shared_ptr<chipstar::Event> Event =
-      ::Backend->createCHIPEvent(ChipContext_);
-  CHIPContextOpenCL *Ctx = (CHIPContextOpenCL *)ChipContext_;
-  CHIPGraphNativeOpenCL *G = (CHIPGraphNativeOpenCL *)NativeGraph;
-  if (!Ctx->supportsCommandBuffers())
-    return nullptr;
-  if (NativeGraph == nullptr)
-    return nullptr;
-  cl_command_queue CQ = ClQueue_->get();
-  int Status = Ctx->exts()->clEnqueueCommandBufferKHR(
-      1, &CQ, G->get(), 0, nullptr,
-      std::static_pointer_cast<CHIPEventOpenCL>(Event)->getNativePtr());
-  CHIPERR_CHECK_LOG_AND_THROW(Status, CL_SUCCESS, hipErrorTbd);
-
-  return Event;
-}
-
-void CHIPQueueOpenCL::destroyNativeGraph(chipstar::GraphNative *NativeGraph) {
-  if (NativeGraph == nullptr)
+void CHIPQueueOpenCL::switchModeTo(QueueMode ToMode) {
+  if (QueueMode_ == ToMode)
     return;
-  CHIPGraphNativeOpenCL *G = (CHIPGraphNativeOpenCL *)NativeGraph;
-  delete G;
-}
 
-bool CHIPGraphNativeOpenCL::addNode(chipstar::GraphNode *NewNode) {
-  cl_sync_point_khr NewSyncPoint = -1;
-
-  // map the dependent chipstar::GraphNodes to OpenCL syncpoints
-  const std::vector<chipstar::GraphNode *> &Dependencies =
-      NewNode->getDependencies();
-  std::vector<cl_sync_point_khr> SyncPointDeps;
-  for (auto Node : Dependencies) {
-    auto Iter = SyncPointMap_.find(Node);
-    if (Iter == SyncPointMap_.end()) {
-      logError("Can't find SyncPoint for Node");
-      return false;
-    }
-    SyncPointDeps.push_back(Iter->second);
-  }
-
-  hipGraphNodeType NodeType = NewNode->getType();
-  bool Res;
-  switch (NodeType) {
-  case hipGraphNodeTypeKernel:
-    Res = addKernelNode((chipstar::GraphNodeKernel *)NewNode, SyncPointDeps,
-                        &NewSyncPoint);
-    break;
-  case hipGraphNodeTypeEmpty:
-    assert(0 && "Empty node should be removed earlier");
-
-#ifdef cl_pocl_command_buffer_svm
-  case hipGraphNodeTypeMemcpy:
-    Res = addMemcpyNode((chipstar::GraphNodeMemcpy *)NewNode, SyncPointDeps,
-                        &NewSyncPoint);
-    break;
-  case hipGraphNodeTypeMemset:
-    Res = addMemsetNode((chipstar::GraphNodeMemset *)NewNode, SyncPointDeps,
-                        &NewSyncPoint);
-    break;
-  case hipGraphNodeTypeMemcpyFromSymbol:
-    Res = addMemcpyNode((chipstar::GraphNodeMemcpyFromSymbol *)NewNode,
-                        SyncPointDeps, &NewSyncPoint);
-    break;
-  case hipGraphNodeTypeMemcpyToSymbol:
-    Res = addMemcpyNode((chipstar::GraphNodeMemcpyToSymbol *)NewNode,
-                        SyncPointDeps, &NewSyncPoint);
-    break;
-#endif
-
-#ifdef cl_pocl_command_buffer_host_exec
-  case hipGraphNodeTypeWaitEvent:
-    Res = addEventWaitNode((chipstar::GraphNodeWaitEvent *)NewNode,
-                           SyncPointDeps, &NewSyncPoint);
-    break;
-  case hipGraphNodeTypeEventRecord:
-    Res = addEventRecordNode((chipstar::GraphNodeEventRecord *)NewNode,
-                             SyncPointDeps, &NewSyncPoint);
-    break;
-  case hipGraphNodeTypeHost:
-    Res = addHostNode((chipstar::GraphNodeHost *)NewNode, SyncPointDeps,
-                      &NewSyncPoint);
-    break;
-#endif
-
-  default:
-    Res = false;
-  }
-  if (!Res)
-    return false;
-
-  SyncPointMap_.insert(std::make_pair(NewNode, NewSyncPoint));
-  return true;
-}
-
-bool CHIPGraphNativeOpenCL::finalize() {
-  int Status = Exts_->clFinalizeCommandBufferKHR(Handle_);
-  if (Status == CL_SUCCESS) {
-    Finalized = true;
-    return true;
-  }
-  logError("clFinalizeCommandBufferKHR FAILED with status {}",
-           resultToString(Status));
-  return false;
-}
-
-CHIPGraphNativeOpenCL::~CHIPGraphNativeOpenCL() {
-  if (Handle_ == nullptr)
+  if (ToMode == Profiling && ChipEnvVars.getOCLDisableQueueProfiling()) {
+    logWarn("Queue profiling is disabled by request. hipEventElapsedTime() "
+            "will not work.");
     return;
-  int Err = Exts_->clReleaseCommandBufferKHR(Handle_);
-  logError("clReleaseCommandBufferKHR FAILED with status {}",
-           resultToString(Err));
-  assert(Err == CL_SUCCESS);
-}
-
-// TODO finish
-bool CHIPGraphNativeOpenCL::addKernelNode(
-    chipstar::GraphNodeKernel *Node,
-    std::vector<cl_sync_point_khr> &SyncPointDeps,
-    cl_sync_point_khr *SyncPoint) {
-
-  int Status;
-  // possibly use: CL_MUTABLE_DISPATCH_UPDATABLE_FIELDS_KHR
-  cl_ndrange_kernel_command_properties_khr Properties[] = {0, 0};
-
-  // TODO: we should add what CHIPQueue::launch does with Registered (Global)
-  // Vars
-  // TODO also look at SpillBuffer handling in:
-  // CHIPEvent *CHIPQueueOpenCL::launchImpl(CHIPExecItem *ExecItem) {
-
-  // setup the kernel arguments before calling clCommandNDRange
-  Node->setupKernelArgs();
-
-  chipstar::Kernel *K = Node->getKernel();
-  CHIPKernelOpenCL *CLK = static_cast<CHIPKernelOpenCL *>(K);
-
-  hipKernelNodeParams Params = Node->getParams();
-  size_t LWSize[3] = {Params.blockDim.x, Params.blockDim.y, Params.blockDim.z};
-  size_t GWSize[3] = {Params.blockDim.x * Params.gridDim.x,
-                      Params.blockDim.y * Params.gridDim.y,
-                      Params.blockDim.z * Params.gridDim.z};
-  uint WorkDim = 3;
-
-  assert(Exts_->clCommandNDRangeKernelKHR);
-  Status = Exts_->clCommandNDRangeKernelKHR(
-      Handle_, nullptr, Properties,
-      CLK->get()->get(), // cl_kernel
-      WorkDim,           // cl_uint work_dim
-      nullptr,           // const size_t* global_work_offset,
-      GWSize,            // const size_t* global_work_size,
-      LWSize,            // const size_t* local_work_size,
-      SyncPointDeps.size(), SyncPointDeps.data(), SyncPoint, nullptr);
-  return Status == CL_SUCCESS;
-}
-
-#ifdef cl_pocl_command_buffer_svm
-
-// TODO finish Arrays
-bool CHIPGraphNativeOpenCL::addMemcpyNode(
-    chipstar::GraphNodeMemcpy *Node,
-    std::vector<cl_sync_point_khr> &SyncPointDeps,
-    cl_sync_point_khr *SyncPoint) {
-  int Status;
-  void *Dst;
-  const void *Src;
-  size_t Size;
-  hipMemcpyKind Kind;
-  hipMemcpy3DParms Params;
-
-  // Although ROCm API ref says that Dst and Src should not overlap,
-  // HIP seems to handle Dst == Src as a special (no-operation) case.
-  // This is seen in the test unit/memory/hipMemcpyAllApiNegative.
-  // Intel GPU OpenCL driver seems to do also so for clEnqueueSVMMemcpy, which
-  // makes/ it pass, but Intel CPU OpenCL returns CL_​MEM_​COPY_​OVERLAP
-  // like it should. To unify the behavior, let's convert the special case to
-  // a marker here, so we can return an event.
-
-  Node->getParams(Dst, Src, Size, Kind);
-  Params = Node->getParams();
-  if (Dst == nullptr || Src == nullptr) {
-    if (!Exts_->clCommandSVMMemcpyRectPOCL)
-      return false;
-    // 3D copy
-    // TODO handle arrays
-    assert(Params.dstArray == nullptr && "Arrays not supported yet");
-    assert(Params.srcArray == nullptr && "Arrays not supported yet");
-
-    /*
-     * The struct passed to cudaMemcpy3D() must specify one of srcArray or
-     * srcPtr and one of dstArray or dstPtr. Passing more than one non-zero
-     * source or destination will cause cudaMemcpy3D() to return an error. The
-     * srcPos and dstPos fields are optional offsets into the source and
-     * destination objects and are defined in units of each object's elements.
-     * The element for a host or device pointer is assumed to be unsigned char.
-     * The extent field defines the dimensions of the transferred area in
-     * elements. If a CUDA array is participating in the copy, the extent is
-     * defined in terms of that array's elements. If no CUDA array is
-     * participating in the copy then the extents are defined in elements of
-     * unsigned char.
-     */
-
-    // TODO: HANDLE FOR ARRAYS:
-    // The srcPos and dstPos fields are optional offsets into the source &
-    // destination objects and are defined in units of each object's elements
-    // ... The element for a host or device pointer is assumed to be unsigned
-    // char.
-    size_t src_origin[3] = {Params.srcPos.x, Params.srcPos.y, Params.srcPos.z};
-    size_t dst_origin[3] = {Params.dstPos.x, Params.dstPos.y, Params.dstPos.z};
-    // If no CUDA array is participating in the copy then the extents
-    // are defined in elements of unsigned char.
-    size_t region[3] = {Params.extent.width, Params.extent.height,
-                        Params.extent.depth};
-
-    // TODO this might be wrong.
-    size_t src_row_pitch = Params.srcPtr.pitch;
-    size_t src_slice_pitch = src_row_pitch * Params.srcPtr.ysize;
-    size_t dst_row_pitch = Params.dstPtr.pitch;
-    size_t dst_slice_pitch = dst_row_pitch * Params.dstPtr.ysize;
-
-    Status = Exts_->clCommandSVMMemcpyRectPOCL(
-        Handle_, nullptr, Dst, Src, dst_origin, src_origin, region,
-        dst_row_pitch, dst_slice_pitch, src_row_pitch, src_slice_pitch,
-        SyncPointDeps.size(), SyncPointDeps.data(), SyncPoint, nullptr);
-  } else {
-    // 1D copy
-    if (!Exts_->clCommandSVMMemcpyPOCL)
-      return false;
-    if (Dst == Src) {
-      Status = Exts_->clCommandBarrierWithWaitListKHR(
-          Handle_, nullptr, SyncPointDeps.size(), SyncPointDeps.data(),
-          SyncPoint, nullptr);
-      CHIPERR_CHECK_LOG_AND_THROW(Status, CL_SUCCESS, hipErrorTbd);
-    } else
-      Status = Exts_->clCommandSVMMemcpyPOCL(
-          Handle_, nullptr, Dst, Src, Size, SyncPointDeps.size(),
-          SyncPointDeps.data(), SyncPoint, nullptr);
   }
 
-  return Status == CL_SUCCESS;
+  // Can't switch mode if the queue is used for interop. Otherwise, we
+  // may cause situations where commands enqueued via HIP and other
+  // API end up be executed out of order.
+  if (UsedInInterOp)
+    CHIPERR_LOG_AND_THROW("Can't switch mode for a queue used of interop.",
+                          hipErrorTbd);
+
+  logDebug("Queue {}: switching mode to {}", (void *)this,
+           ToMode == Profiling ? "profiling" : "regular");
+
+  // Make sure commands are executed in-order across the current and
+  // switched-to queue.
+  auto &FromQ = *get();
+  auto &ToQ = ToMode == Profiling ? ClProfilingQueue_ : ClRegularQueue_;
+  assert(FromQ.get());
+  assert(ToQ.get());
+
+  cl_event SwitchEv;
+  cl_int clStatus;
+  clStatus = clEnqueueMarkerWithWaitList(FromQ.get(), 0, nullptr, &SwitchEv);
+  CHIPERR_CHECK_LOG_AND_THROW_TABLE(clEnqueueMarkerWithWaitList);
+
+  clStatus = clEnqueueBarrierWithWaitList(ToQ.get(), 1, &SwitchEv, nullptr);
+  CHIPERR_CHECK_LOG_AND_THROW_TABLE(clEnqueueBarrierWithWaitList);
+
+  auto *ChipEv = new CHIPEventOpenCL(
+      static_cast<CHIPContextOpenCL *>(ChipContext_), SwitchEv);
+  updateLastEvent(std::shared_ptr<chipstar::Event>(ChipEv));
+  QueueMode_ = ToMode;
 }
-
-bool CHIPGraphNativeOpenCL::addMemcpyNode(
-    chipstar::GraphNodeMemcpyFromSymbol *Node,
-    std::vector<cl_sync_point_khr> &SyncPointDeps,
-    cl_sync_point_khr *SyncPoint) {
-
-  if (!Exts_->clCommandSVMMemcpyPOCL)
-    return false;
-
-  void *Dst = nullptr;
-  void *Src = nullptr;
-  const void *Symbol;
-  size_t SizeBytes;
-  size_t Offset;
-  hipMemcpyKind Kind;
-  Node->getParams(Dst, Symbol, SizeBytes, Offset, Kind);
-
-  hipError_t Err = hipGetSymbolAddress(&Src, Symbol);
-  if (Err != HIP_SUCCESS)
-    return false;
-
-  int Status = Exts_->clCommandSVMMemcpyPOCL(
-      Handle_, nullptr, Dst, (const char *)Src + Offset, SizeBytes,
-      SyncPointDeps.size(), SyncPointDeps.data(), SyncPoint, nullptr);
-
-  return Status == CL_SUCCESS;
-}
-
-bool CHIPGraphNativeOpenCL::addMemcpyNode(
-    chipstar::GraphNodeMemcpyToSymbol *Node,
-    std::vector<cl_sync_point_khr> &SyncPointDeps,
-    cl_sync_point_khr *SyncPoint) {
-  if (!Exts_->clCommandSVMMemcpyPOCL)
-    return false;
-
-  void *Dst = nullptr;
-  void *Src = nullptr;
-  const void *Symbol;
-  size_t SizeBytes;
-  size_t Offset;
-  hipMemcpyKind Kind;
-  Node->getParams(Src, Symbol, SizeBytes, Offset, Kind);
-
-  hipError_t Err = hipGetSymbolAddress(&Dst, Symbol);
-  if (Err != HIP_SUCCESS)
-    return false;
-
-  int Status = Exts_->clCommandSVMMemcpyPOCL(
-      Handle_, nullptr, (char *)Dst + Offset, Src, SizeBytes,
-      SyncPointDeps.size(), SyncPointDeps.data(), SyncPoint, nullptr);
-  return Status == CL_SUCCESS;
-}
-
-bool CHIPGraphNativeOpenCL::addMemsetNode(
-    chipstar::GraphNodeMemset *Node,
-    std::vector<cl_sync_point_khr> &SyncPointDeps,
-    cl_sync_point_khr *SyncPoint) {
-  if (!Exts_->clCommandSVMMemfillRectPOCL)
-    return false;
-
-  hipMemsetParams Params = Node->getParams();
-
-  int Status;
-  size_t Region[3] = {Params.width, Params.height, 1};
-  Status = Exts_->clCommandSVMMemfillRectPOCL(
-      Handle_, nullptr, Params.dst,
-      nullptr,      // origin
-      Region,       // region
-      Params.pitch, // row pitch
-      0,            // slice pitch
-      (const void *)&Params.value, Params.elementSize, SyncPointDeps.size(),
-      SyncPointDeps.data(), SyncPoint, nullptr);
-  return Status == CL_SUCCESS;
-}
-#endif
-
-#ifdef cl_pocl_command_buffer_host_exec
-
-bool CHIPGraphNativeOpenCL::addHostNode(
-    chipstar::GraphNodeHost *Node,
-    std::vector<cl_sync_point_khr> &SyncPointDeps,
-    cl_sync_point_khr *SyncPoint) {
-  if (!Exts_->clCommandHostFuncPOCL)
-    return false;
-
-  hipHostNodeParams Params = Node->getParams();
-
-  int Status;
-  Status = Exts_->clCommandHostFuncPOCL(
-      Handle_, nullptr, Params.fn, Params.userData, SyncPointDeps.size(),
-      SyncPointDeps.data(), SyncPoint, nullptr);
-  return Status == CL_SUCCESS;
-}
-
-bool CHIPGraphNativeOpenCL::addEventRecordNode(
-    chipstar::GraphNodeEventRecord *Node,
-    std::vector<cl_sync_point_khr> &SyncPointDeps,
-    cl_sync_point_khr *SyncPoint) {
-  if (!Exts_->clCommandSignalEventPOCL)
-    return false;
-
-  return false;
-  // unfinished
-#if 0
-  CHIPEvent *E = Node->getEvent();
-  CHIPEventOpenCL *CLE = static_cast<CHIPEventOpenCL *>(E);
-
-  int Status;
-  Status = Exts->clCommandSignalEventPOCL(Handle, nullptr, nullptr, SyncPoint,
-                                          nullptr);
-  return Status == CL_SUCCESS;
-#endif
-}
-
-bool CHIPGraphNativeOpenCL::addEventWaitNode(
-    chipstar::GraphNodeWaitEvent *Node,
-    std::vector<cl_sync_point_khr> &SyncPointDeps,
-    cl_sync_point_khr *SyncPoint) {
-  if (!Exts_->clCommandWaitForEventPOCL)
-    return false;
-
-  chipstar::Event *E = Node->getEvent();
-  CHIPEventOpenCL *CLE = static_cast<CHIPEventOpenCL *>(E);
-
-  int Status;
-  Status = Exts_->clCommandWaitForEventPOCL(
-      Handle_, nullptr, CLE->getNativeRef(), SyncPoint, nullptr);
-  return Status == CL_SUCCESS;
-}
-#endif
 
 // CHIPExecItemOpenCL
 //*************************************************************************
@@ -2271,6 +1843,11 @@ void CHIPExecItemOpenCL::setupAllArgs() {
   return;
 }
 
+void CHIPExecItemOpenCL::copyArgs(void** args) {
+    Args_ = args;
+    ArgsSetup = false;
+}
+
 void CHIPExecItemOpenCL::setKernel(chipstar::Kernel *Kernel) {
   assert(Kernel && "Kernel is nullptr!");
 
@@ -2292,7 +1869,6 @@ chipstar::ExecItem *CHIPBackendOpenCL::createExecItem(dim3 GirdDim,
       new CHIPExecItemOpenCL(GirdDim, BlockDim, SharedMem, ChipQueue);
   return ExecItem;
 };
-
 chipstar::Queue *CHIPBackendOpenCL::createCHIPQueue(chipstar::Device *ChipDev) {
   CHIPDeviceOpenCL *ChipDevCl = (CHIPDeviceOpenCL *)ChipDev;
   return new CHIPQueueOpenCL(ChipDevCl, OCL_DEFAULT_QUEUE_PRIORITY);
@@ -2398,9 +1974,7 @@ void CHIPBackendOpenCL::initializeImpl() {
 
   // Create context which has devices
   // Create queues that have devices each of which has an associated context
-  // TODO Change this to spirv_enabled_devices
-  cl::Context *Ctx = new cl::Context(SpirvDevices);
-
+  cl::Context Ctx(SupportedDevices);
   CHIPContextOpenCL *ChipContext =
       new CHIPContextOpenCL(Ctx, Device, SelectedPlatform);
   ::Backend->addContext(ChipContext);
@@ -2419,9 +1993,10 @@ void CHIPBackendOpenCL::initializeFromNative(const uintptr_t *NativeHandles,
   cl_device_id DevId = (cl_device_id)NativeHandles[1];
   cl_context CtxId = (cl_context)NativeHandles[2];
 
+  cl::Context Ctx(CtxId);
+  cl::Platform Plat(PlatId);
   cl::Device *Dev = new cl::Device(DevId);
-  cl::Platform Plat(Dev->getInfo<CL_DEVICE_PLATFORM>());
-  cl::Context *Ctx = new cl::Context(CtxId);
+
   CHIPContextOpenCL *ChipContext = new CHIPContextOpenCL(Ctx, *Dev, Plat);
   addContext(ChipContext);
 
