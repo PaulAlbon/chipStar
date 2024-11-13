@@ -26,20 +26,21 @@
 #include "chipStarConfig.hh"
 #include "SPIRVFuncInfo.hh"
 
-#include <map>
-#include <set>
-#include <vector>
-#include <stdint.h>
-#include <string>
-#include <memory>
-#include <unordered_set>
-#include <utility>
-#include <sstream>
 #include <algorithm>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <queue>
+#include <set>
+#include <sstream>
 #include <stack>
+#include <stdint.h>
+#include <string>
+#include <string_view>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 using SPVFunctionInfoMap = std::map<std::string, std::shared_ptr<SPVFuncInfo>>;
 
