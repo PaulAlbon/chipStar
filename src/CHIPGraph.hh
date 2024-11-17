@@ -41,43 +41,38 @@
 
 namespace chipstar {
 class Queue;
-class Kernel;
 class Event;
 class ExecItem;
-class Graph;
-class GraphNode;
 } // namespace chipstar
 
-namespace chipstar {
+class CHIPGraph;
 
-class GraphNode : public hipGraphNode {
+class CHIPGraphNode : public hipGraphNode {
 protected:
   hipGraphNodeType Type_;
   // nodes which depend on this node
-  std::vector<GraphNode *> Dependendants_;
+  std::vector<CHIPGraphNode *> Dependendants_;
   // nodes on which this node depends
-  std::vector<GraphNode *> Dependencies_;
+  std::vector<CHIPGraphNode *> Dependencies_;
   /**
-   * @brief Destroy the GraphNode object
+   * @brief Destroy the CHIPGraphNode object
    * Hidden virtual destructor. Should only be called through derived classes.
    */
-  virtual ~GraphNode() {
+  virtual ~CHIPGraphNode() {
     Dependendants_.clear();
     Dependencies_.clear();
   }
 
-  GraphNode(hipGraphNodeType Type) : Type_(Type) {}
-
-  void checkDependencies(size_t numDependencies, GraphNode **pDependencies);
+  CHIPGraphNode(hipGraphNodeType Type) : Type_(Type) {}
 
 public:
   std::string Msg; // TODO Graphs cleanup
-  GraphNode(const GraphNode &Other)
+  CHIPGraphNode(const CHIPGraphNode &Other)
       : Type_(Other.Type_), Dependendants_(Other.Dependendants_),
         Dependencies_(Other.Dependencies_), Msg(Other.Msg) {}
 
   hipGraphNodeType getType() { return Type_; }
-  virtual GraphNode *clone() const = 0;
+  virtual CHIPGraphNode *clone() const = 0;
 
   /**
    * @brief Depth-first search of the graph.
@@ -87,8 +82,8 @@ public:
    * @param CurrPath space for the current path
    * @param Paths space for the paths
    */
-  void DFS(std::vector<GraphNode *> CurrPath,
-           std::vector<std::vector<GraphNode *>> &Paths);
+  void DFS(std::vector<CHIPGraphNode *> CurrPath,
+           std::vector<std::vector<CHIPGraphNode *>> &Paths);
 
   /**
    * @brief Pure virtual method to be overriden by derived classes. This method
@@ -105,7 +100,7 @@ public:
    *
    * @param TheNode
    */
-  void addDependant(GraphNode *TheNode) {
+  void addDependant(CHIPGraphNode *TheNode) {
     logDebug("{} addDependant() <{} depends on {}>", (void *)this, TheNode->Msg,
              Msg);
     Dependendants_.push_back(TheNode);
@@ -118,7 +113,7 @@ public:
    *
    * @param TheNode
    */
-  void addDependants(std::vector<GraphNode *> Nodes) {
+  void addDependants(std::vector<CHIPGraphNode *> Nodes) {
     for (auto Node : Nodes) {
       addDependant(Node);
     }
@@ -131,10 +126,7 @@ public:
    *
    * @param TheNode
    */
-  void addDependency(GraphNode *TheNode) {
-    if (TheNode == nullptr)
-      CHIPERR_LOG_AND_THROW("addDependency called with nullptr",
-                            hipErrorInvalidValue);
+  void addDependency(CHIPGraphNode *TheNode) {
     logDebug("{} addDependency() <{} depends on {}>", (void *)this, Msg,
              TheNode->Msg);
     Dependencies_.push_back(TheNode);
@@ -148,11 +140,7 @@ public:
    *
    * @param TheNode
    */
-  void removeDependency(GraphNode *TheNode) {
-    if (TheNode == nullptr) {
-      CHIPERR_LOG_AND_THROW("removeDependency called with nullptr",
-                            hipErrorInvalidValue);
-    }
+  void removeDependency(CHIPGraphNode *TheNode) {
     logDebug("{} removeDependency() <{} depends on {}>", (void *)this, Msg,
              TheNode->Msg);
     auto FoundNode =
@@ -160,7 +148,7 @@ public:
     if (FoundNode != Dependencies_.end()) {
       Dependencies_.erase(FoundNode);
     } else {
-      CHIPERR_LOG_AND_THROW("Failed to find", hipErrorInvalidValue);
+      CHIPERR_LOG_AND_THROW("Failed to find", hipErrorTbd);
     }
   }
 
@@ -172,9 +160,8 @@ public:
    * @param Dependencies
    * @param Count
    */
-  void addDependencies(GraphNode **Dependencies, size_t Count) {
-    checkDependencies(Count, Dependencies);
-    for (size_t i = 0; i < Count; i++) {
+  void addDependencies(CHIPGraphNode **Dependencies, int Count) {
+    for (int i = 0; i < Count; i++) {
       addDependency(Dependencies[i]);
     }
   }
@@ -186,7 +173,7 @@ public:
    *
    * @param Dependencies
    */
-  void addDependencies(std::vector<GraphNode *> Dependencies) {
+  void addDependencies(std::vector<CHIPGraphNode *> Dependencies) {
     for (auto Node : Dependencies) {
       addDependency(Node);
     }
@@ -199,9 +186,8 @@ public:
    *
    * @param TheNode
    */
-  void removeDependencies(GraphNode **Dependencies, size_t Count) {
-    checkDependencies(Count, Dependencies);
-    for (size_t i = 0; i < Count; i++) {
+  void removeDependencies(CHIPGraphNode **Dependencies, int Count) {
+    for (int i = 0; i < Count; i++) {
       removeDependency(Dependencies[i]);
     }
   }
@@ -218,8 +204,8 @@ public:
    * @param CloneMap  the map containing relationships of which original node
    * does each cloned node correspond to.
    */
-  void updateDependencies(std::map<GraphNode *, GraphNode *> &CloneMap) {
-    std::vector<GraphNode *> NewDeps;
+  void updateDependencies(std::map<CHIPGraphNode *, CHIPGraphNode *> CloneMap) {
+    std::vector<CHIPGraphNode *> NewDeps;
     for (auto Dep : Dependencies_) {
       auto ClonedDep = CloneMap[Dep];
       logDebug("{} {} Replacing dependency {} with {}", (void *)this, this->Msg,
@@ -243,8 +229,8 @@ public:
    * @param CloneMap  the map containing relationships of which original node
    * does each cloned node correspond to.
    */
-  void updateDependants(std::map<GraphNode *, GraphNode *> CloneMap) {
-    std::vector<GraphNode *> NewDeps;
+  void updateDependants(std::map<CHIPGraphNode *, CHIPGraphNode *> CloneMap) {
+    std::vector<CHIPGraphNode *> NewDeps;
     for (auto Dep : Dependendants_) {
       auto ClonedDep = CloneMap[Dep];
       logDebug("{} {} Replacing dependant {} with {}", (void *)this, this->Msg,
@@ -260,20 +246,20 @@ public:
    * @brief Get the Dependencies object
    *  nodes which depend on this node
    *
-   * @return std::vector<GraphNode *>
+   * @return std::vector<CHIPGraphNode *>
    */
-  std::vector<GraphNode *> getDependencies() const { return Dependencies_; }
+  std::vector<CHIPGraphNode *> getDependencies() const { return Dependencies_; }
 
   /**
    * @brief Get the Dependants object
    * nodes on which this node depends
    *
-   * @return std::vector<GraphNode *>
+   * @return std::vector<CHIPGraphNode *>
    */
-  std::vector<GraphNode *> getDependants() const { return Dependendants_; }
+  std::vector<CHIPGraphNode *> getDependants() const { return Dependendants_; }
 };
 
-class GraphNodeKernel : public GraphNode {
+class CHIPGraphNodeKernel : public CHIPGraphNode {
 private:
   /// A block holding the bytes of the kernel arguments.
   std::vector<char> ArgData_;
@@ -282,39 +268,23 @@ private:
   std::vector<void *> ArgList_;
 
   hipKernelNodeParams Params_;
-  std::vector<void*> KernelArgs_;
   chipstar::ExecItem *ExecItem_;
-  chipstar::Kernel *Kernel_;
 
 public:
-  GraphNodeKernel(const GraphNodeKernel &Other);
+  CHIPGraphNodeKernel(const CHIPGraphNodeKernel &Other);
 
-  GraphNodeKernel(const hipKernelNodeParams *TheParams);
+  CHIPGraphNodeKernel(const hipKernelNodeParams *TheParams);
 
-  GraphNodeKernel(const void *HostFunction, dim3 GridDim, dim3 BlockDim,
-                  void **Args, size_t SharedMem);
+  CHIPGraphNodeKernel(const void *HostFunction, dim3 GridDim, dim3 BlockDim,
+                      void **Args, size_t SharedMem);
 
-  virtual ~GraphNodeKernel() override;
+  virtual ~CHIPGraphNodeKernel() override {}
+
   virtual void execute(chipstar::Queue *Queue) const override;
 
   hipKernelNodeParams getParams() const { return Params_; }
 
-  /// the Kernel arguments have to be setup either just before launch (when
-  /// using the execute() path), or if using the CHIPGraphNative then
-  /// just before calling their graph construction APIs.
-  ///
-  /// This is because Kernels in both LevelZero and OpenCL are stateful,
-  /// and users can add multiple nodes with the same kernel into a Graph.
-  /// Setting up arguments in GraphNodeKernel ctor would then
-  /// lead to all nodes using the same (those set up last) arguments.
-  void setupKernelArgs() const;
-  chipstar::Kernel *getKernel() const { return Kernel_; }
-
-  void setParams(const hipKernelNodeParams Params) {
-    // dont allow changing kernel, needs refactoring
-    CHIPASSERT(Params.func == Params_.func);
-    Params_ = Params;
-  }
+  void setParams(const hipKernelNodeParams Params) { Params_ = Params; }
   /**
    * @brief Createa a copy of this node
    * Must copy over all the arguments
@@ -322,12 +292,12 @@ public:
    * Copying over the dependencies is important because CHIPGraph::clone() uses
    * them to remap onto new nodes
    *
-   * @return GraphNode*
+   * @return CHIPGraphNode*
    */
-  virtual GraphNode *clone() const override;
+  virtual CHIPGraphNode *clone() const override;
 };
 
-class GraphNodeMemcpy : public GraphNode {
+class CHIPGraphNodeMemcpy : public CHIPGraphNode {
 private:
   hipMemcpy3DParms Params_;
 
@@ -337,24 +307,24 @@ private:
   hipMemcpyKind Kind_;
 
 public:
-  GraphNodeMemcpy(const GraphNodeMemcpy &Other)
-      : GraphNode(Other), Params_(Other.Params_), Dst_(Other.Dst_),
+  CHIPGraphNodeMemcpy(const CHIPGraphNodeMemcpy &Other)
+      : CHIPGraphNode(Other), Params_(Other.Params_), Dst_(Other.Dst_),
         Src_(Other.Src_), Count_(Other.Count_), Kind_(Other.Kind_) {}
 
-  GraphNodeMemcpy(hipMemcpy3DParms Params)
-      : GraphNode(hipGraphNodeTypeMemcpy), Params_(Params), Dst_(nullptr),
-        Src_(nullptr), Count_(0), Kind_(hipMemcpyKind::hipMemcpyDefault) {}
-  GraphNodeMemcpy(const hipMemcpy3DParms *Params)
-      : GraphNode(hipGraphNodeTypeMemcpy) {
+  CHIPGraphNodeMemcpy(hipMemcpy3DParms Params)
+      : CHIPGraphNode(hipGraphNodeTypeMemcpy), Params_(Params) {}
+  CHIPGraphNodeMemcpy(const hipMemcpy3DParms *Params)
+      : CHIPGraphNode(hipGraphNodeTypeMemcpy) {
     setParams(Params);
   }
 
   // 1D MemCpy
-  GraphNodeMemcpy(void *Dst, const void *Src, size_t Count, hipMemcpyKind Kind)
-      : GraphNode(hipGraphNodeTypeMemcpy), Dst_(Dst), Src_(Src), Count_(Count),
-        Kind_(Kind) {}
+  CHIPGraphNodeMemcpy(void *Dst, const void *Src, size_t Count,
+                      hipMemcpyKind Kind)
+      : CHIPGraphNode(hipGraphNodeTypeMemcpy), Dst_(Dst), Src_(Src),
+        Count_(Count), Kind_(Kind) {}
 
-  virtual ~GraphNodeMemcpy() override {}
+  virtual ~CHIPGraphNodeMemcpy() override {}
 
   hipMemcpy3DParms getParams() { return Params_; }
 
@@ -364,14 +334,6 @@ public:
     Src_ = Src;
     Count_ = Count;
     Kind_ = Kind;
-  }
-
-  void getParams(void *&Dst, const void *&Src, size_t &Count,
-                 hipMemcpyKind &Kind) {
-    Dst = Dst_;
-    Src = Src_;
-    Count = Count_;
-    Kind = Kind_;
   }
 
   void setParams(const hipMemcpy3DParms *Params) {
@@ -391,55 +353,55 @@ public:
 
   virtual void execute(chipstar::Queue *Queue) const override;
 
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeMemcpy(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeMemcpy(*this);
     return NewNode;
   }
 };
 
-class GraphNodeMemset : public GraphNode {
+class CHIPGraphNodeMemset : public CHIPGraphNode {
 private:
   hipMemsetParams Params_;
 
 public:
-  GraphNodeMemset(const GraphNodeMemset &Other)
-      : GraphNode(Other), Params_(Other.Params_) {}
+  CHIPGraphNodeMemset(const CHIPGraphNodeMemset &Other)
+      : CHIPGraphNode(Other), Params_(Other.Params_) {}
 
-  GraphNodeMemset(const hipMemsetParams Params)
-      : GraphNode(hipGraphNodeTypeMemset), Params_(Params) {}
+  CHIPGraphNodeMemset(const hipMemsetParams Params)
+      : CHIPGraphNode(hipGraphNodeTypeMemset), Params_(Params) {}
 
-  GraphNodeMemset(const hipMemsetParams *Params)
-      : GraphNode(hipGraphNodeTypeMemset), Params_(*Params) {}
+  CHIPGraphNodeMemset(const hipMemsetParams *Params)
+      : CHIPGraphNode(hipGraphNodeTypeMemset), Params_(*Params) {}
 
-  virtual ~GraphNodeMemset() override {}
+  virtual ~CHIPGraphNodeMemset() override {}
 
   hipMemsetParams getParams() { return Params_; }
   void setParams(const hipMemsetParams *Params) { Params_ = *Params; }
 
   virtual void execute(chipstar::Queue *Queue) const override;
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeMemset(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeMemset(*this);
     return NewNode;
   }
 };
 
-class GraphNodeHost : public GraphNode {
+class CHIPGraphNodeHost : public CHIPGraphNode {
 private:
   hipHostNodeParams Params_;
 
 public:
-  GraphNodeHost(const GraphNodeHost &Other)
-      : GraphNode(Other), Params_(Other.Params_) {}
+  CHIPGraphNodeHost(const CHIPGraphNodeHost &Other)
+      : CHIPGraphNode(Other), Params_(Other.Params_) {}
 
-  GraphNodeHost(const hipHostNodeParams *Params)
-      : GraphNode(hipGraphNodeTypeHost), Params_(*Params) {}
+  CHIPGraphNodeHost(const hipHostNodeParams *Params)
+      : CHIPGraphNode(hipGraphNodeTypeHost), Params_(*Params) {}
 
-  virtual ~GraphNodeHost() override {}
+  virtual ~CHIPGraphNodeHost() override {}
 
   virtual void execute(chipstar::Queue *Queue) const override;
 
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeHost(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeHost(*this);
     return NewNode;
   }
 
@@ -448,67 +410,67 @@ public:
   hipHostNodeParams getParams() { return Params_; }
 };
 
-class GraphNodeGraph : public GraphNode {
+class CHIPGraphNodeGraph : public CHIPGraphNode {
 private:
-  Graph *SubGraph_;
+  CHIPGraph *SubGraph_;
 
 public:
-  GraphNodeGraph(Graph *Graph)
-      : GraphNode(hipGraphNodeTypeGraph), SubGraph_(Graph) {}
+  CHIPGraphNodeGraph(CHIPGraph *Graph)
+      : CHIPGraphNode(hipGraphNodeTypeGraph), SubGraph_(Graph) {}
 
-  GraphNodeGraph(const GraphNodeGraph &Other)
-      : GraphNode(Other), SubGraph_(Other.SubGraph_) {}
+  CHIPGraphNodeGraph(const CHIPGraphNodeGraph &Other)
+      : CHIPGraphNode(Other), SubGraph_(Other.SubGraph_) {}
 
-  virtual ~GraphNodeGraph() override {}
+  virtual ~CHIPGraphNodeGraph() override {}
 
   virtual void execute(chipstar::Queue *Queue) const override {
     CHIPERR_LOG_AND_THROW("Attemped to execute GraphNode", hipErrorTbd);
   }
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeGraph(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeGraph(*this);
     return NewNode;
   }
 
-  void setGraph(Graph *Graph) { SubGraph_ = Graph; }
+  void setGraph(CHIPGraph *Graph) { SubGraph_ = Graph; }
 
-  Graph *getGraph() { return SubGraph_; }
+  CHIPGraph *getGraph() { return SubGraph_; }
 };
 
-class GraphNodeEmpty : public GraphNode {
+class CHIPGraphNodeEmpty : public CHIPGraphNode {
 public:
-  GraphNodeEmpty(const GraphNodeEmpty &Other) : GraphNode(Other) {}
+  CHIPGraphNodeEmpty(const CHIPGraphNodeEmpty &Other) : CHIPGraphNode(Other) {}
 
-  GraphNodeEmpty() : GraphNode(hipGraphNodeTypeEmpty) {}
+  CHIPGraphNodeEmpty() : CHIPGraphNode(hipGraphNodeTypeEmpty) {}
 
-  virtual ~GraphNodeEmpty() override {}
+  virtual ~CHIPGraphNodeEmpty() override {}
 
   virtual void execute(chipstar::Queue *Queue) const override {
     logDebug("Executing empty node");
   }
 
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeEmpty(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeEmpty(*this);
     return NewNode;
   }
 };
 
-class GraphNodeWaitEvent : public GraphNode {
+class CHIPGraphNodeWaitEvent : public CHIPGraphNode {
 private:
   chipstar::Event *Event_;
 
 public:
-  GraphNodeWaitEvent(chipstar::Event *Event)
-      : GraphNode(hipGraphNodeTypeWaitEvent), Event_(Event) {}
+  CHIPGraphNodeWaitEvent(chipstar::Event *Event)
+      : CHIPGraphNode(hipGraphNodeTypeWaitEvent), Event_(Event) {}
 
-  GraphNodeWaitEvent(const GraphNodeWaitEvent &Other)
-      : GraphNode(Other), Event_(Other.Event_) {}
+  CHIPGraphNodeWaitEvent(const CHIPGraphNodeWaitEvent &Other)
+      : CHIPGraphNode(Other), Event_(Other.Event_) {}
 
-  virtual ~GraphNodeWaitEvent() override {}
+  virtual ~CHIPGraphNodeWaitEvent() override {}
 
   virtual void execute(chipstar::Queue *Queue) const override;
 
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeWaitEvent(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeWaitEvent(*this);
     return NewNode;
   }
 
@@ -516,23 +478,23 @@ public:
   void setEvent(chipstar::Event *Event) { Event_ = Event; }
 };
 
-class GraphNodeEventRecord : public GraphNode {
+class CHIPGraphNodeEventRecord : public CHIPGraphNode {
 private:
   chipstar::Event *Event_;
 
 public:
-  GraphNodeEventRecord(chipstar::Event *Event)
-      : GraphNode(hipGraphNodeTypeEventRecord), Event_(Event){};
+  CHIPGraphNodeEventRecord(chipstar::Event *Event)
+      : CHIPGraphNode(hipGraphNodeTypeEventRecord), Event_(Event){};
 
-  GraphNodeEventRecord(const GraphNodeEventRecord &Other)
-      : GraphNode(Other), Event_(Other.Event_) {}
+  CHIPGraphNodeEventRecord(const CHIPGraphNodeEventRecord &Other)
+      : CHIPGraphNode(Other), Event_(Other.Event_) {}
 
-  virtual ~GraphNodeEventRecord() override {}
+  virtual ~CHIPGraphNodeEventRecord() override {}
 
   virtual void execute(chipstar::Queue *Queue) const override;
 
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeEventRecord(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeEventRecord(*this);
     return NewNode;
   }
 
@@ -541,7 +503,7 @@ public:
   chipstar::Event *getEvent() { return Event_; }
 };
 
-class GraphNodeMemcpyFromSymbol : public GraphNode {
+class CHIPGraphNodeMemcpyFromSymbol : public CHIPGraphNode {
 private:
   void *Dst_;
   void *Symbol_;
@@ -550,18 +512,18 @@ private:
   hipMemcpyKind Kind_;
 
 public:
-  GraphNodeMemcpyFromSymbol(void *Dst, const void *Symbol, size_t SizeBytes,
-                            size_t Offset, hipMemcpyKind Kind)
-      : GraphNode(hipGraphNodeTypeMemcpyFromSymbol), Dst_(Dst),
+  CHIPGraphNodeMemcpyFromSymbol(void *Dst, const void *Symbol, size_t SizeBytes,
+                                size_t Offset, hipMemcpyKind Kind)
+      : CHIPGraphNode(hipGraphNodeTypeMemcpyFromSymbol), Dst_(Dst),
         Symbol_(const_cast<void *>(Symbol)), SizeBytes_(SizeBytes),
         Offset_(Offset), Kind_(Kind) {}
 
-  GraphNodeMemcpyFromSymbol(const GraphNodeMemcpyFromSymbol &Other)
-      : GraphNode(Other), Dst_(Other.Dst_), Symbol_(Other.Symbol_),
+  CHIPGraphNodeMemcpyFromSymbol(const CHIPGraphNodeMemcpyFromSymbol &Other)
+      : CHIPGraphNode(Other), Dst_(Other.Dst_), Symbol_(Other.Symbol_),
         SizeBytes_(Other.SizeBytes_), Offset_(Other.Offset_),
         Kind_(Other.Kind_) {}
 
-  virtual ~GraphNodeMemcpyFromSymbol() override {}
+  virtual ~CHIPGraphNodeMemcpyFromSymbol() override {}
 
   virtual void execute(chipstar::Queue *Queue) const override;
 
@@ -571,25 +533,16 @@ public:
     Symbol_ = const_cast<void *>(Symbol);
     SizeBytes_ = SizeBytes;
     Offset_ = Offset;
-    Kind_ = Kind;
-  }
-
-  void getParams(void *&Dst, const void *&Symbol, size_t &SizeBytes,
-                 size_t &Offset, hipMemcpyKind &Kind) {
-    Dst = Dst_;
-    Symbol = Symbol_;
-    SizeBytes = SizeBytes_;
-    Offset = Offset_;
     Kind = Kind_;
   }
 
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeMemcpyFromSymbol(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeMemcpyFromSymbol(*this);
     return NewNode;
   }
 };
 
-class GraphNodeMemcpyToSymbol : public GraphNode {
+class CHIPGraphNodeMemcpyToSymbol : public CHIPGraphNode {
 private:
   void *Src_;
   void *Symbol_;
@@ -598,23 +551,23 @@ private:
   hipMemcpyKind Kind_;
 
 public:
-  GraphNodeMemcpyToSymbol(void *Src, const void *Symbol, size_t SizeBytes,
-                          size_t Offset, hipMemcpyKind Kind)
-      : GraphNode(hipGraphNodeTypeMemcpyToSymbol), Src_(Src),
+  CHIPGraphNodeMemcpyToSymbol(void *Src, const void *Symbol, size_t SizeBytes,
+                              size_t Offset, hipMemcpyKind Kind)
+      : CHIPGraphNode(hipGraphNodeTypeMemcpyToSymbol), Src_(Src),
         Symbol_(const_cast<void *>(Symbol)), SizeBytes_(SizeBytes),
         Offset_(Offset), Kind_(Kind) {}
 
-  GraphNodeMemcpyToSymbol(const GraphNodeMemcpyToSymbol &Other)
-      : GraphNode(Other), Src_(Other.Src_), Symbol_(Other.Symbol_),
+  CHIPGraphNodeMemcpyToSymbol(const CHIPGraphNodeMemcpyToSymbol &Other)
+      : CHIPGraphNode(Other), Src_(Other.Src_), Symbol_(Other.Symbol_),
         SizeBytes_(Other.SizeBytes_), Offset_(Other.Offset_),
         Kind_(Other.Kind_) {}
 
-  virtual ~GraphNodeMemcpyToSymbol() override {}
+  virtual ~CHIPGraphNodeMemcpyToSymbol() override {}
 
   virtual void execute(chipstar::Queue *Queue) const override;
 
-  virtual GraphNode *clone() const override {
-    auto NewNode = new GraphNodeMemcpyToSymbol(*this);
+  virtual CHIPGraphNode *clone() const override {
+    auto NewNode = new CHIPGraphNodeMemcpyToSymbol(*this);
     return NewNode;
   }
 
@@ -624,69 +577,60 @@ public:
     Symbol_ = const_cast<void *>(Symbol);
     SizeBytes_ = SizeBytes;
     Offset_ = Offset;
-    Kind_ = Kind;
-  }
-
-  void getParams(void *&Src, const void *&Symbol, size_t &SizeBytes,
-                 size_t &Offset, hipMemcpyKind &Kind) {
-    Src = Src_;
-    Symbol = Symbol_;
-    SizeBytes = SizeBytes_;
-    Offset = Offset_;
     Kind = Kind_;
   }
 };
 
-class Graph : public ihipGraph {
+class CHIPGraph : public ihipGraph {
 protected:
-  std::vector<GraphNode *> Nodes_;
+  std::vector<CHIPGraphNode *> Nodes_;
   // Map the pointers Original -> Clone
-  std::map<GraphNode *, GraphNode *> CloneMap_;
+  std::map<CHIPGraphNode *, CHIPGraphNode *> CloneMap_;
 
 public:
-  Graph(const Graph &OriginalGraph);
-  Graph() {}
-  void addNode(GraphNode *TheNode);
-  void removeNode(GraphNode *TheNode);
+  CHIPGraph(const CHIPGraph &OriginalGraph);
+  CHIPGraph() {}
+  void addNode(CHIPGraphNode *TheNode);
+  void removeNode(CHIPGraphNode *TheNode);
   /**
    * @brief Lookup a cloned(instantiated) node using a pointer to the original
    * node
    *
    * @param OriginalNode pointer to the node which was present in CHIPGraph at
    * the time of instantiation of CHIPGraph to CHIPGraphExec
-   * @return GraphNode* pointer to the resulting node in CHIPGraphExec which
+   * @return CHIPGraphNode* pointer to the resulting node in CHIPGraphExec which
    * corresponds to the original node
    */
-  GraphNode *nodeLookup(GraphNode *OriginalNode) {
+  CHIPGraphNode *nodeLookup(CHIPGraphNode *OriginalNode) {
     if (!CloneMap_.count(OriginalNode)) {
       return nullptr;
     }
     return CloneMap_[OriginalNode];
   }
-  std::vector<GraphNode *> getLeafNodes();
-  std::vector<GraphNode *> getRootNodes();
-  GraphNode *getClonedNodeFromOriginal(GraphNode *OriginalNode) {
+  std::vector<CHIPGraphNode *> getLeafNodes();
+  std::vector<CHIPGraphNode *> getRootNodes();
+  CHIPGraphNode *getClonedNodeFromOriginal(CHIPGraphNode *OriginalNode) {
     if (!CloneMap_.count(OriginalNode)) {
-      CHIPERR_LOG_AND_THROW("Failed to find the node in clone",
-                            hipErrorInvalidValue);
+      CHIPERR_LOG_AND_THROW("Failed to find the node in clone", hipErrorTbd);
     } else {
       return CloneMap_[OriginalNode];
     }
   }
 
-  std::vector<GraphNode *> &getNodes() { return Nodes_; }
+  std::vector<CHIPGraphNode *> &getNodes() { return Nodes_; }
 
-  std::vector<std::pair<GraphNode *, GraphNode *>> getEdges() {
-    std::set<std::pair<GraphNode *, GraphNode *>> Edges;
+  std::vector<std::pair<CHIPGraphNode *, CHIPGraphNode *>> getEdges() {
+    std::set<std::pair<CHIPGraphNode *, CHIPGraphNode *>> Edges;
     for (auto Node : Nodes_) {
       for (auto Dep : Node->getDependencies()) {
-        auto FromToPair = std::pair<GraphNode *, GraphNode *>(Node, Dep);
+        auto FromToPair =
+            std::pair<CHIPGraphNode *, CHIPGraphNode *>(Node, Dep);
         Edges.insert(FromToPair);
       }
     }
 
-    return std::vector<std::pair<GraphNode *, GraphNode *>>(Edges.begin(),
-                                                            Edges.end());
+    return std::vector<std::pair<CHIPGraphNode *, CHIPGraphNode *>>(
+        Edges.begin(), Edges.end());
   };
 
   /**
@@ -695,9 +639,9 @@ public:
    * verify that the node exists in this graph and return the non-const handle.
    *
    * @param Node the node to find in this graph
-   * @return GraphNode*  the non-const handle of this found node.
+   * @return CHIPGraphNode*  the non-const handle of this found node.
    */
-  GraphNode *findNode(GraphNode *Node) {
+  CHIPGraphNode *findNode(CHIPGraphNode *Node) {
     auto FoundNode = std::find(Nodes_.begin(), Nodes_.end(), Node);
     if (FoundNode != Nodes_.end()) {
       return *FoundNode;
@@ -707,34 +651,20 @@ public:
   }
 };
 
-class GraphNative {
+class CHIPGraphExec : public hipGraphExec {
 protected:
-  bool Finalized;
-
-public:
-  GraphNative() : Finalized(false){};
-  virtual ~GraphNative() {}
-  bool isFinalized() { return Finalized; }
-  virtual bool finalize() { return false; }
-  virtual bool addNode(GraphNode *NewNode) { return false; }
-};
-
-class GraphExec : public hipGraphExec {
-protected:
-  Graph *OriginalGraph_;
-  Graph CompiledGraph_;
-
-  std::unique_ptr<GraphNative> NativeGraph;
+  CHIPGraph *OriginalGraph_;
+  CHIPGraph CompiledGraph_;
 
   /**
    * @brief each element in this queue represents represents a sequence of nodes
    * that can be submitted to one or more queues
    *
    */
-  std::queue<std::set<GraphNode *>> ExecQueues_;
+  std::queue<std::set<CHIPGraphNode *>> ExecQueues_;
 
   /**
-   * @brief For every GraphNodeGraph in CompiledGraph_, replace this node
+   * @brief For every CHIPGraphNodeGraph in CompiledGraph_, replace this node
    * with its contents.
    *
    */
@@ -752,6 +682,19 @@ protected:
    */
   void pruneGraph_();
 
+public:
+  CHIPGraphExec(CHIPGraph *Graph)
+      : OriginalGraph_(Graph), /* Copy the pointer to the original graph */
+        CompiledGraph_(CHIPGraph(*Graph)) /* invoke the copy constructor to make
+                                             a clone of the graph */
+  {}
+
+  ~CHIPGraphExec() {}
+
+  void launch(chipstar::Queue *Queue);
+
+  CHIPGraph *getOriginalGraphPtr() const { return OriginalGraph_; }
+
   /**
    * @brief Optimize and generate ExecQueues_
    *
@@ -762,22 +705,6 @@ protected:
    *
    */
   void compile();
-
-public:
-  GraphExec(Graph *Graph)
-      : OriginalGraph_(Graph), /* Copy the pointer to the original graph */
-        CompiledGraph_(*Graph) /* invoke the copy constructor to make
-                                             a clone of the graph */
-  {}
-
-  ~GraphExec() {}
-
-  void launch(chipstar::Queue *Queue);
-  bool tryLaunchNative(chipstar::Queue *Queue);
-
-  Graph *getOriginalGraphPtr() const { return OriginalGraph_; }
 };
-
-} // namespace chipstar
 
 #endif // include guard
