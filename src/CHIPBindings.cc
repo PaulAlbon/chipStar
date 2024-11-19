@@ -79,6 +79,34 @@ static void checkMemcpyKind(chipstar::Device &Dev, hipMemcpyKind Kind) {
         hipErrorInvalidMemcpyDirection);
 }
 
+hipError_t hipMemcpyInternalEnqueue(void* dst, const void* src, size_t size,
+                                   hipMemcpyKind kind) {
+  CHIP_TRY
+  if (size == 0)
+    RETURN(hipSuccess);
+
+  NULLCHECK(dst, src);
+  
+  if (dst == src) {
+      logWarn("Src and Dst are same. Skipping the copy");
+      RETURN(hipSuccess);
+  }
+
+  if (kind == hipMemcpyHostToHost) {
+      memcpy(dst, src, size);
+      RETURN(hipSuccess);
+  }
+
+  auto Queue = Backend->getActiveDevice()->getDefaultQueue();
+  checkMemcpyKind(*Queue->getDevice(), kind);
+
+  LOCK(Queue->QueueMtx);
+  Queue->memCopyEnqueue(dst, src, size, kind);
+  RETURN(Queue->execute());
+  
+  CHIP_CATCH
+}
+
 hipError_t hipModuleGetTexRef(textureReference **texRef, hipModule_t hmod,
                               const char *name) {
   CHIP_TRY
@@ -4482,7 +4510,14 @@ hipError_t hipMemcpy(void *Dst, const void *Src, size_t SizeBytes,
   CHIP_TRY
   LOCK(ApiMtx);
   CHIPInitialize();
-  RETURN(hipMemcpyInternal(Dst, Src, SizeBytes, Kind));
+  auto Res = hipMemcpyInternalEnqueue(Dst, Src, SizeBytes, Kind);
+  if (Res == hipSuccess) {
+      auto Queue = Backend->getActiveDevice()->getDefaultQueue();
+      Queue->finish();  // Ensure synchronization for non-async version
+  }
+  RETURN(Res);
+  //RETURN(hipMemcpyInternal(Dst, Src, SizeBytes, Kind));
+  //RETURN(hipMemcpyInternalEnqueue(Dst, Src, SizeBytes, Kind));
   CHIP_CATCH
 }
 

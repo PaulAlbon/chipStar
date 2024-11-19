@@ -283,9 +283,30 @@ protected:
   ze_command_list_handle_t ZeCmdListImm_ = 0;
   ze_command_list_handle_t ZeCmdListImmCopy_ = 0;
 
+  std::unique_ptr<FencedCmdList> EnqueuedCmdList;
+
   void initializeCmdListImm();
 
 public:
+  virtual void memCopyEnqueue(void* dst, const void* src, size_t size,
+                               hipMemcpyKind kind) override {
+    if (!EnqueuedCmdList)
+        EnqueuedCmdList = std::make_unique<FencedCmdList>(ZeDev_, ZeCtx_, CommandListDesc_);
+
+    zeCommandListAppendMemoryCopy(
+        EnqueuedCmdList->getCmdList(),
+        dst, src, size, nullptr, 0, nullptr);
+  }
+
+  virtual hipError_t execute() override {
+    if (!EnqueuedCmdList)
+        return hipSuccess;
+
+    EnqueuedCmdList->execute(ZeCmdQ_);
+    EnqueuedCmdList.reset();
+    return hipSuccess;
+  }
+
   void recordEvent(chipstar::Event *ChipEvent) override;
   std::mutex CommandListMtx; /// prevent simultaneous access to ZeCmdListImm_
 

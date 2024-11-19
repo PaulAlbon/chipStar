@@ -2088,6 +2088,17 @@ public:
  */
 class Queue : public ihipStream_t {
 protected:
+  struct MemCopyArgs {
+        void* dst;
+        const void* src;
+        size_t size;
+        hipMemcpyKind kind;
+        
+        MemCopyArgs(void* d, const void* s, size_t sz, hipMemcpyKind k)
+            : dst(d), src(s), size(sz), kind(k) {}
+  };
+  std::deque<MemCopyArgs> ArgQueue;
+
   hipStreamCaptureStatus CaptureStatus_ = hipStreamCaptureStatusNone;
   hipStreamCaptureMode CaptureMode_ = hipStreamCaptureModeGlobal;
   hipGraph_t CaptureGraph_;
@@ -2122,6 +2133,21 @@ protected:
 public:
   /// @brief Get the host/device timestamps and copy them to the event.
   /// @param Event The event to update.
+  virtual void memCopyEnqueue(void* dst, const void* src, size_t size, 
+                               hipMemcpyKind kind) {
+    ArgQueue.emplace_back(dst, src, size, kind);
+  }
+  
+  virtual hipError_t execute() {
+    // Default implementation: process stored commands
+    while (!ArgQueue.empty()) {
+        auto args = ArgQueue.front();
+        ArgQueue.pop_front();
+        memCopyAsyncImpl(args.dst, args.src, args.size, args.kind);
+    }
+    return hipSuccess;
+  }
+
   virtual void recordEvent(chipstar::Event *Event) = 0;
   bool isDefaultLegacyQueue() { return isDefaultLegacyQueue_; }
   bool isDefaultPerThreadQueue() { return isPerThreadDefaultQueue_; }
