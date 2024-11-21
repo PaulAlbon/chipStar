@@ -41,6 +41,7 @@
 
 namespace chipstar {
 class Queue;
+class Kernel;
 class Event;
 class ExecItem;
 } // namespace chipstar
@@ -269,6 +270,7 @@ private:
 
   hipKernelNodeParams Params_;
   chipstar::ExecItem *ExecItem_;
+  chipstar::Kernel *Kernel_;
 
 public:
   CHIPGraphNodeKernel(const CHIPGraphNodeKernel &Other);
@@ -283,6 +285,17 @@ public:
   virtual void execute(chipstar::Queue *Queue) const override;
 
   hipKernelNodeParams getParams() const { return Params_; }
+
+  /// the Kernel arguments have to be setup either just before launch (when
+  /// using the execute() path), or if using the CHIPGraphNative then
+  /// just before calling their graph construction APIs.
+  ///
+  /// This is because Kernels in both LevelZero and OpenCL are stateful,
+  /// and users can add multiple nodes with the same kernel into a Graph.
+  /// Setting up arguments in GraphNodeKernel ctor would then
+  /// lead to all nodes using the same (those set up last) arguments.
+  void setupKernelArgs() const;
+  chipstar::Kernel *getKernel() const { return Kernel_; }
 
   void setParams(const hipKernelNodeParams Params) { Params_ = Params; }
   /**
@@ -651,10 +664,26 @@ public:
   }
 };
 
+namespace chipstar {
+class CHIPGraphNative {
+protected:
+  bool Finalized;
+
+public:
+  CHIPGraphNative() : Finalized(false){};
+  virtual ~CHIPGraphNative() {}
+  bool isFinalized() { return Finalized; }
+  virtual bool finalize() { return false; }
+  virtual bool addNode(CHIPGraphNode *NewNode) { return false; }
+};
+} // namespace chipstar
+
 class CHIPGraphExec : public hipGraphExec {
 protected:
   CHIPGraph *OriginalGraph_;
   CHIPGraph CompiledGraph_;
+
+  std::unique_ptr<chipstar::CHIPGraphNative> NativeGraph;
 
   /**
    * @brief each element in this queue represents represents a sequence of nodes
@@ -692,6 +721,7 @@ public:
   ~CHIPGraphExec() {}
 
   void launch(chipstar::Queue *Queue);
+  bool tryLaunchNative(chipstar::Queue *Queue);
 
   CHIPGraph *getOriginalGraphPtr() const { return OriginalGraph_; }
 

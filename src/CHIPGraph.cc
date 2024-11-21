@@ -87,10 +87,12 @@ CHIPGraphNodeKernel::CHIPGraphNodeKernel(const CHIPGraphNodeKernel &Other)
     : CHIPGraphNode(Other) {
   Params_ = Other.Params_;
   ExecItem_ = Other.ExecItem_->clone();
+  Kernel_ = Other.Kernel_;
 }
 
 CHIPGraphNode *CHIPGraphNodeKernel::clone() const {
   auto NewNode = new CHIPGraphNodeKernel(*this);
+  NewNode->Kernel_ = Kernel_;
   return NewNode;
 }
 
@@ -117,6 +119,11 @@ void CHIPGraphNodeMemcpy::execute(chipstar::Queue *Queue) const {
 }
 void CHIPGraphNodeKernel::execute(chipstar::Queue *Queue) const {
   Queue->launch(ExecItem_);
+}
+
+void CHIPGraphNodeKernel::setupKernelArgs() const {
+  ExecItem_->copyArgs(Params_.kernelParams);
+  ExecItem_->setupAllArgs();
 }
 
 CHIPGraphNodeKernel::CHIPGraphNodeKernel(const hipKernelNodeParams *TheParams)
@@ -190,27 +197,68 @@ void CHIPGraph::removeNode(CHIPGraphNode *Node) {
   }
 }
 
-void CHIPGraphExec::launch(chipstar::Queue *Queue) {
-  logDebug("{} CHIPGraphExec::launch({})", (void *)this, (void *)Queue);
-  compile();
-  auto ExecQueueCopy = ExecQueues_;
-  while (ExecQueueCopy.size()) {
-    auto Nodes = ExecQueueCopy.front();
-    std::string NodesInThisLevel = "";
-    for (auto Node : Nodes) {
-      NodesInThisLevel += Node->Msg + " ";
+bool CHIPGraphExec::tryLaunchNative(chipstar::Queue *Queue) {
+  bool UsedNativeGraph = false;
+  if (NativeGraph) {
+    if (NativeGraph->isFinalized())
+      logDebug("NativeGraph: launching existing graph");
+    else {
+      logDebug("NativeGraph: constructed but failed to finalize");
+      return false;
     }
-    logDebug("Executing nodes: {}", NodesInThisLevel);
-    for (auto Node : Nodes) {
-      logDebug("Executing {}", Node->Msg);
-      Node->execute(Queue);
-      Queue->finish();
-    }
+  } else {
+    logDebug("NativeGraph: trying to construct");
+    NativeGraph.reset(Queue->createNativeGraph());
+    if (!NativeGraph)
+      return false;
 
-    ExecQueueCopy.pop();
+    for (auto &Node : OriginalGraph_->getNodes())
+      if (!NativeGraph->addNode(Node)) {
+        logError("NativeGraph: failed to add node of type: {}",
+                 Node->getType());
+        return false;
+      }
+
+    if (!NativeGraph->finalize()) {
+      logDebug("NativeGraph: failed to finalize");
+      return false;
+    }
   }
+
+  assert(NativeGraph->isFinalized());
+  if (Queue->enqueueNativeGraph(NativeGraph.get())) {
+    logDebug("NativeGraph: launched");
+    Queue->finish();
+    return true;
+  }
+  return false;
 }
 
+void CHIPGraphExec::launch(chipstar::Queue *Queue) {
+  logDebug("{} CHIPGraphExec::launch({})", (void *)this, (void *)Queue);
+  bool UsedNativeGraph = tryLaunchNative(Queue);
+
+  if (!UsedNativeGraph) {
+    logDebug("NativeGraph: failed to construct/finalize/launch, using the "
+             "original code path");
+    compile();
+    auto ExecQueueCopy = ExecQueues_;
+    while (ExecQueueCopy.size()) {
+      auto Nodes = ExecQueueCopy.front();
+      std::string NodesInThisLevel = "";
+      for (auto Node : Nodes)
+        NodesInThisLevel += Node->Msg + " ";
+      logDebug("Executing nodes: {}", NodesInThisLevel);
+      for (auto Node : Nodes) {
+        logDebug("Executing {}", Node->Msg);
+        Node->execute(Queue);
+        Queue->finish();
+      }
+
+      ExecQueueCopy.pop();
+    }
+  }
+}
 void unchainUnnecessaryDeps(std::vector<CHIPGraphNode *> Path,
                             std::vector<CHIPGraphNode *> SubPath) {
   assert(Path.size() > SubPath.size());

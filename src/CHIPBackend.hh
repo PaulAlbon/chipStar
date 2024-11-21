@@ -96,6 +96,7 @@ class Device;
 class EventMonitor;
 class Texture;
 class Context;
+class CHIPGraphNative;
 
 using SharedEventVector = std::vector<std::shared_ptr<chipstar::Event>>;
 using LockGuardVector =
@@ -2201,6 +2202,13 @@ public:
   CHIPGraph *getCaptureGraph() const;
 
   chipstar::Device *PerThreadQueueForDevice = nullptr;
+
+  virtual std::shared_ptr<chipstar::Event>
+  enqueueNativeGraph(chipstar::CHIPGraphNative *NativeGraph) {
+    return nullptr;
+  }
+  virtual chipstar::CHIPGraphNative *createNativeGraph() { return nullptr; }
+  virtual void destroyNativeGraph(chipstar::CHIPGraphNative *) { return; }
 
   // I want others to be able to lock this queue?
   std::mutex QueueMtx;

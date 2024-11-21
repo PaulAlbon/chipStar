@@ -23,6 +23,7 @@
 #include "CHIPBackendOpenCL.hh"
 #include "Utils.hh"
 
+#include <memory>
 #include <sstream>
 
 #include "Utils.hh"
@@ -1978,6 +1979,398 @@ void CHIPQueueOpenCL::switchModeTo(QueueMode ToMode) {
   updateLastEvent(std::shared_ptr<chipstar::Event>(ChipEv));
   QueueMode_ = ToMode;
 }
+
+chipstar::CHIPGraphNative *CHIPQueueOpenCL::createNativeGraph() {
+  // should not raise an error if we fail to create a graph,
+  // because there is a fallback solution
+  CHIPContextOpenCL *Ctx = (CHIPContextOpenCL *)ChipContext_;
+  if (!Ctx->supportsCommandBuffers())
+    return nullptr;
+
+  cl_command_queue CQ = ClRegularQueue_.get();
+  int err = CL_SUCCESS;
+  cl_command_buffer_khr Res =
+      Ctx->exts()->clCreateCommandBufferKHR(1, &CQ, 0, &err);
+  if (Res == nullptr || err != CL_SUCCESS) {
+    logError("clCreateCommandBufferKHR FAILED with status {}",
+             resultToString(err));
+    return nullptr;
+  }
+
+  return new CHIPGraphNativeOpenCL(Res, CQ, Ctx->exts());
+}
+
+std::shared_ptr<chipstar::Event>
+CHIPQueueOpenCL::enqueueNativeGraph(chipstar::CHIPGraphNative *NativeGraph) {
+
+  std::shared_ptr<chipstar::Event> Event =
+      ::Backend->createEventShared(ChipContext_);
+  CHIPContextOpenCL *Ctx = (CHIPContextOpenCL *)ChipContext_;
+  CHIPGraphNativeOpenCL *G = (CHIPGraphNativeOpenCL *)NativeGraph;
+  if (!Ctx->supportsCommandBuffers())
+    return nullptr;
+  if (NativeGraph == nullptr)
+    return nullptr;
+  cl_command_queue CQ = ClRegularQueue_.get();
+  int Status = Ctx->exts()->clEnqueueCommandBufferKHR(
+      1, &CQ, G->get(), 0, nullptr,
+      std::static_pointer_cast<CHIPEventOpenCL>(Event)->getNativePtr());
+
+  return Event;
+}
+
+void CHIPQueueOpenCL::destroyNativeGraph(chipstar::CHIPGraphNative *NativeGraph) {
+  if (NativeGraph == nullptr)
+    return;
+  CHIPGraphNativeOpenCL *G = (CHIPGraphNativeOpenCL *)NativeGraph;
+  delete G;
+}
+
+bool CHIPGraphNativeOpenCL::addNode(CHIPGraphNode *NewNode) {
+  cl_sync_point_khr NewSyncPoint = -1;
+
+  // map the dependent chipstar::GraphNodes to OpenCL syncpoints
+  const std::vector<CHIPGraphNode *> &Dependencies =
+      NewNode->getDependencies();
+  std::vector<cl_sync_point_khr> SyncPointDeps;
+  for (auto Node : Dependencies) {
+    auto Iter = SyncPointMap_.find(Node);
+    if (Iter == SyncPointMap_.end()) {
+      logError("Can't find SyncPoint for Node");
+      return false;
+    }
+    SyncPointDeps.push_back(Iter->second);
+  }
+
+  hipGraphNodeType NodeType = NewNode->getType();
+  bool Res;
+  switch (NodeType) {
+  case hipGraphNodeTypeKernel:
+    Res = addKernelNode((CHIPGraphNodeKernel *)NewNode, SyncPointDeps,
+                        &NewSyncPoint);
+    break;
+  case hipGraphNodeTypeEmpty:
+    assert(0 && "Empty node should be removed earlier");
+
+#ifdef cl_pocl_command_buffer_svm
+  case hipGraphNodeTypeMemcpy:
+    Res = addMemcpyNode((CHIPGraphNodeMemcpy *)NewNode, SyncPointDeps,
+                        &NewSyncPoint);
+    break;
+  case hipGraphNodeTypeMemset:
+    Res = addMemsetNode((CHIPGraphNodeMemset *)NewNode, SyncPointDeps,
+                        &NewSyncPoint);
+    break;
+  case hipGraphNodeTypeMemcpyFromSymbol:
+    Res = addMemcpyNode((CHIPGraphNodeMemcpyFromSymbol *)NewNode,
+                        SyncPointDeps, &NewSyncPoint);
+    break;
+  case hipGraphNodeTypeMemcpyToSymbol:
+    Res = addMemcpyNode((CHIPGraphNodeMemcpyToSymbol *)NewNode,
+                        SyncPointDeps, &NewSyncPoint);
+    break;
+#endif
+
+#ifdef cl_pocl_command_buffer_host_exec
+  case hipGraphNodeTypeWaitEvent:
+    Res = addEventWaitNode((CHIPGraphNodeWaitEvent *)NewNode,
+                           SyncPointDeps, &NewSyncPoint);
+    break;
+  case hipGraphNodeTypeEventRecord:
+    Res = addEventRecordNode((CHIPGraphNodeEventRecord *)NewNode,
+                             SyncPointDeps, &NewSyncPoint);
+    break;
+  case hipGraphNodeTypeHost:
+    Res = addHostNode((CHIPGraphNodeHost *)NewNode, SyncPointDeps,
+                      &NewSyncPoint);
+    break;
+#endif
+
+  default:
+    Res = false;
+  }
+  if (!Res)
+    return false;
+
+  SyncPointMap_.insert(std::make_pair(NewNode, NewSyncPoint));
+  return true;
+}
+
+bool CHIPGraphNativeOpenCL::finalize() {
+  int Status = Exts_->clFinalizeCommandBufferKHR(Handle_);
+  if (Status == CL_SUCCESS) {
+    Finalized = true;
+    return true;
+  }
+  logError("clFinalizeCommandBufferKHR FAILED with status {}",
+           resultToString(Status));
+  return false;
+}
+
+CHIPGraphNativeOpenCL::~CHIPGraphNativeOpenCL() {
+  if (Handle_ == nullptr)
+    return;
+  int Err = Exts_->clReleaseCommandBufferKHR(Handle_);
+  logError("clReleaseCommandBufferKHR FAILED with status {}",
+           resultToString(Err));
+  assert(Err == CL_SUCCESS);
+}
+
+// TODO finish
+bool CHIPGraphNativeOpenCL::addKernelNode(
+    CHIPGraphNodeKernel *Node,
+    std::vector<cl_sync_point_khr> &SyncPointDeps,
+    cl_sync_point_khr *SyncPoint) {
+
+  int Status;
+  // possibly use: CL_MUTABLE_DISPATCH_UPDATABLE_FIELDS_KHR
+  cl_ndrange_kernel_command_properties_khr Properties[] = {0, 0};
+
+  // TODO: we should add what CHIPQueue::launch does with Registered (Global)
+  // Vars
+  // TODO also look at SpillBuffer handling in:
+  // CHIPEvent *CHIPQueueOpenCL::launchImpl(CHIPExecItem *ExecItem) {
+
+  // setup the kernel arguments before calling clCommandNDRange
+  Node->setupKernelArgs();
+
+  chipstar::Kernel *K = Node->getKernel();
+  CHIPKernelOpenCL *CLK = static_cast<CHIPKernelOpenCL *>(K);
+
+  hipKernelNodeParams Params = Node->getParams();
+  size_t LWSize[3] = {Params.blockDim.x, Params.blockDim.y, Params.blockDim.z};
+  size_t GWSize[3] = {Params.blockDim.x * Params.gridDim.x,
+                      Params.blockDim.y * Params.gridDim.y,
+                      Params.blockDim.z * Params.gridDim.z};
+  uint WorkDim = 3;
+
+  assert(Exts_->clCommandNDRangeKernelKHR);
+  auto KernelHandle = CLK->getKernelHandle();
+  Status = Exts_->clCommandNDRangeKernelKHR(
+      Handle_, nullptr, Properties,
+      KernelHandle, // cl_kernel
+      WorkDim,           // cl_uint work_dim
+      nullptr,           // const size_t* global_work_offset,
+      GWSize,            // const size_t* global_work_size,
+      LWSize,            // const size_t* local_work_size,
+      SyncPointDeps.size(), SyncPointDeps.data(), SyncPoint, nullptr);
+  return Status == CL_SUCCESS;
+}
+
+#ifdef cl_pocl_command_buffer_svm
+
+// TODO finish Arrays
+bool CHIPGraphNativeOpenCL::addMemcpyNode(
+    CHIPGraphNodeMemcpy *Node,
+    std::vector<cl_sync_point_khr> &SyncPointDeps,
+    cl_sync_point_khr *SyncPoint) {
+  int Status;
+  void *Dst;
+  const void *Src;
+  size_t Size;
+  hipMemcpyKind Kind;
+  hipMemcpy3DParms Params;
+
+  // Although ROCm API ref says that Dst and Src should not overlap,
+  // HIP seems to handle Dst == Src as a special (no-operation) case.
+  // This is seen in the test unit/memory/hipMemcpyAllApiNegative.
+  // Intel GPU OpenCL driver seems to do also so for clEnqueueSVMMemcpy, which
+  // makes/ it pass, but Intel CPU OpenCL returns CL_​MEM_​COPY_​OVERLAP
+  // like it should. To unify the behavior, let's convert the special case to
+  // a marker here, so we can return an event.
+
+  Node->setParams(Dst, Src, Size, Kind);
+  Params = Node->getParams();
+  if (Dst == nullptr || Src == nullptr) {
+    if (!Exts_->clCommandSVMMemcpyRectPOCL)
+      return false;
+    // 3D copy
+    // TODO handle arrays
+    assert(Params.dstArray == nullptr && "Arrays not supported yet");
+    assert(Params.srcArray == nullptr && "Arrays not supported yet");
+
+    /*
+     * The struct passed to cudaMemcpy3D() must specify one of srcArray or
+     * srcPtr and one of dstArray or dstPtr. Passing more than one non-zero
+     * source or destination will cause cudaMemcpy3D() to return an error. The
+     * srcPos and dstPos fields are optional offsets into the source and
+     * destination objects and are defined in units of each object's elements.
+     * The element for a host or device pointer is assumed to be unsigned char.
+     * The extent field defines the dimensions of the transferred area in
+     * elements. If a CUDA array is participating in the copy, the extent is
+     * defined in terms of that array's elements. If no CUDA array is
+     * participating in the copy then the extents are defined in elements of
+     * unsigned char.
+     */
+
+    // TODO: HANDLE FOR ARRAYS:
+    // The srcPos and dstPos fields are optional offsets into the source &
+    // destination objects and are defined in units of each object's elements
+    // ... The element for a host or device pointer is assumed to be unsigned
+    // char.
+    size_t src_origin[3] = {Params.srcPos.x, Params.srcPos.y, Params.srcPos.z};
+    size_t dst_origin[3] = {Params.dstPos.x, Params.dstPos.y, Params.dstPos.z};
+    // If no CUDA array is participating in the copy then the extents
+    // are defined in elements of unsigned char.
+    size_t region[3] = {Params.extent.width, Params.extent.height,
+                        Params.extent.depth};
+
+    // TODO this might be wrong.
+    size_t src_row_pitch = Params.srcPtr.pitch;
+    size_t src_slice_pitch = src_row_pitch * Params.srcPtr.ysize;
+    size_t dst_row_pitch = Params.dstPtr.pitch;
+    size_t dst_slice_pitch = dst_row_pitch * Params.dstPtr.ysize;
+
+    Status = Exts_->clCommandSVMMemcpyRectPOCL(
+        Handle_, nullptr, Dst, Src, dst_origin, src_origin, region,
+        dst_row_pitch, dst_slice_pitch, src_row_pitch, src_slice_pitch,
+        SyncPointDeps.size(), SyncPointDeps.data(), SyncPoint, nullptr);
+  } else {
+    // 1D copy
+    if (!Exts_->clCommandSVMMemcpyPOCL)
+      return false;
+    if (Dst == Src) {
+      Status = Exts_->clCommandBarrierWithWaitListKHR(
+          Handle_, nullptr, SyncPointDeps.size(), SyncPointDeps.data(),
+          SyncPoint, nullptr);
+    } else
+      Status = Exts_->clCommandSVMMemcpyPOCL(
+          Handle_, nullptr, Dst, Src, Size, SyncPointDeps.size(),
+          SyncPointDeps.data(), SyncPoint, nullptr);
+  }
+
+  return Status == CL_SUCCESS;
+}
+
+bool CHIPGraphNativeOpenCL::addMemcpyNode(
+    CHIPGraphNodeMemcpyFromSymbol *Node,
+    std::vector<cl_sync_point_khr> &SyncPointDeps,
+    cl_sync_point_khr *SyncPoint) {
+
+  if (!Exts_->clCommandSVMMemcpyPOCL)
+    return false;
+
+  void *Dst = nullptr;
+  void *Src = nullptr;
+  const void *Symbol;
+  size_t SizeBytes;
+  size_t Offset;
+  hipMemcpyKind Kind;
+  Node->setParams(Dst, Symbol, SizeBytes, Offset, Kind);
+
+  hipError_t Err = hipGetSymbolAddress(&Src, Symbol);
+  if (Err != HIP_SUCCESS)
+    return false;
+
+  int Status = Exts_->clCommandSVMMemcpyPOCL(
+      Handle_, nullptr, Dst, (const char *)Src + Offset, SizeBytes,
+      SyncPointDeps.size(), SyncPointDeps.data(), SyncPoint, nullptr);
+
+  return Status == CL_SUCCESS;
+}
+
+bool CHIPGraphNativeOpenCL::addMemcpyNode(
+    CHIPGraphNodeMemcpyToSymbol *Node,
+    std::vector<cl_sync_point_khr> &SyncPointDeps,
+    cl_sync_point_khr *SyncPoint) {
+  if (!Exts_->clCommandSVMMemcpyPOCL)
+    return false;
+
+  void *Dst = nullptr;
+  void *Src = nullptr;
+  const void *Symbol;
+  size_t SizeBytes;
+  size_t Offset;
+  hipMemcpyKind Kind;
+  Node->setParams(Src, Symbol, SizeBytes, Offset, Kind);
+
+  hipError_t Err = hipGetSymbolAddress(&Dst, Symbol);
+  if (Err != HIP_SUCCESS)
+    return false;
+
+  int Status = Exts_->clCommandSVMMemcpyPOCL(
+      Handle_, nullptr, (char *)Dst + Offset, Src, SizeBytes,
+      SyncPointDeps.size(), SyncPointDeps.data(), SyncPoint, nullptr);
+  return Status == CL_SUCCESS;
+}
+
+bool CHIPGraphNativeOpenCL::addMemsetNode(
+    CHIPGraphNodeMemset *Node,
+    std::vector<cl_sync_point_khr> &SyncPointDeps,
+    cl_sync_point_khr *SyncPoint) {
+  if (!Exts_->clCommandSVMMemfillRectPOCL)
+    return false;
+
+  hipMemsetParams Params = Node->getParams();
+
+  int Status;
+  size_t Region[3] = {Params.width, Params.height, 1};
+  Status = Exts_->clCommandSVMMemfillRectPOCL(
+      Handle_, nullptr, Params.dst,
+      nullptr,      // origin
+      Region,       // region
+      Params.pitch, // row pitch
+      0,            // slice pitch
+      (const void *)&Params.value, Params.elementSize, SyncPointDeps.size(),
+      SyncPointDeps.data(), SyncPoint, nullptr);
+  return Status == CL_SUCCESS;
+}
+#endif
+
+#ifdef cl_pocl_command_buffer_host_exec
+
+bool CHIPGraphNativeOpenCL::addHostNode(
+    CHIPGraphNodeHost *Node,
+    std::vector<cl_sync_point_khr> &SyncPointDeps,
+    cl_sync_point_khr *SyncPoint) {
+  if (!Exts_->clCommandHostFuncPOCL)
+    return false;
+
+  hipHostNodeParams Params = Node->getParams();
+
+  int Status;
+  Status = Exts_->clCommandHostFuncPOCL(
+      Handle_, nullptr, Params.fn, Params.userData, SyncPointDeps.size(),
+      SyncPointDeps.data(), SyncPoint, nullptr);
+  return Status == CL_SUCCESS;
+}
+
+bool CHIPGraphNativeOpenCL::addEventRecordNode(
+    CHIPGraphNodeEventRecord *Node,
+    std::vector<cl_sync_point_khr> &SyncPointDeps,
+    cl_sync_point_khr *SyncPoint) {
+  if (!Exts_->clCommandSignalEventPOCL)
+    return false;
+
+  return false;
+  // unfinished
+#if 0
+  CHIPEvent *E = Node->getEvent();
+  CHIPEventOpenCL *CLE = static_cast<CHIPEventOpenCL *>(E);
+
+  int Status;
+  Status = Exts->clCommandSignalEventPOCL(Handle, nullptr, nullptr, SyncPoint,
+                                          nullptr);
+  return Status == CL_SUCCESS;
+#endif
+}
+
+bool CHIPGraphNativeOpenCL::addEventWaitNode(
+    CHIPGraphNodeWaitEvent *Node,
+    std::vector<cl_sync_point_khr> &SyncPointDeps,
+    cl_sync_point_khr *SyncPoint) {
+  if (!Exts_->clCommandWaitForEventPOCL)
+    return false;
+
+  chipstar::Event *E = Node->getEvent();
+  CHIPEventOpenCL *CLE = static_cast<CHIPEventOpenCL *>(E);
+
+  int Status;
+  Status = Exts_->clCommandWaitForEventPOCL(
+      Handle_, nullptr, CLE->getNativeRef(), SyncPoint, nullptr);
+  return Status == CL_SUCCESS;
+}
+#endif
 
 // CHIPExecItemOpenCL
 //*************************************************************************
