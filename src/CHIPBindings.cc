@@ -1024,13 +1024,13 @@ hipError_t hipGraphRemoveDependencies(hipGraph_t graph,
   LOCK(ApiMtx);
   CHIPInitialize();
 
-  if(!graph)
+  if (!graph)
     RETURN(hipErrorInvalidValue);
 
-  if(!from)
+  if (!from)
     RETURN(hipErrorInvalidValue);
 
-  if(!to)
+  if (!to)
     RETURN(hipErrorInvalidValue);
 
   CHIPGraphNode *FoundNode = GRAPH(graph)->findNode(NODE(*to));

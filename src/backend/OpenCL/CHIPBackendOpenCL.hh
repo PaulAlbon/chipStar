@@ -234,15 +234,46 @@ private:
                                               hipMemoryType MemType);
 };
 
+typedef struct {
+  clCreateCommandBufferKHR_fn clCreateCommandBufferKHR;
+  clCommandCopyBufferKHR_fn clCommandCopyBufferKHR;
+  clCommandCopyBufferRectKHR_fn clCommandCopyBufferRectKHR;
+  clCommandFillBufferKHR_fn clCommandFillBufferKHR;
+  clCommandNDRangeKernelKHR_fn clCommandNDRangeKernelKHR;
+  clCommandBarrierWithWaitListKHR_fn clCommandBarrierWithWaitListKHR;
+  clFinalizeCommandBufferKHR_fn clFinalizeCommandBufferKHR;
+  clEnqueueCommandBufferKHR_fn clEnqueueCommandBufferKHR;
+  clReleaseCommandBufferKHR_fn clReleaseCommandBufferKHR;
+  clGetCommandBufferInfoKHR_fn clGetCommandBufferInfoKHR;
+
+#ifdef cl_pocl_command_buffer_svm
+  clCommandSVMMemcpyPOCL_fn clCommandSVMMemcpyPOCL;
+  clCommandSVMMemcpyRectPOCL_fn clCommandSVMMemcpyRectPOCL;
+  clCommandSVMMemfillPOCL_fn clCommandSVMMemfillPOCL;
+  clCommandSVMMemfillRectPOCL_fn clCommandSVMMemfillRectPOCL;
+#endif
+
+#ifdef cl_pocl_command_buffer_host_exec
+  clCommandHostFuncPOCL_fn clCommandHostFuncPOCL;
+  clCommandWaitForEventPOCL_fn clCommandWaitForEventPOCL;
+  clCommandSignalEventPOCL_fn clCommandSignalEventPOCL;
+#endif
+
+} CHIPContextClExts;
+
 class CHIPContextOpenCL : public chipstar::Context {
 private:
   cl::Platform Platform_;
   cl::Context ClContext;
   mutable clSetKernelArgDevicePointerEXT_fn clSetKernelArgDevicePointerEXT_ =
       nullptr;
+  bool SupportsCommandBuffers;
+  bool SupportsCommandBuffersSVM;
+  bool SupportsCommandBuffersHost;
 
 public:
   MemoryManager MemManager_;
+  CHIPContextClExts Exts_;
   bool allDevicesSupportFineGrainSVMorUSM();
   CHIPContextOpenCL(cl::Context CtxIn, cl::Device Dev, cl::Platform Plat);
   virtual ~CHIPContextOpenCL() {
@@ -257,6 +288,10 @@ public:
   bool isAllocatedPtrMappedToVM(void *Ptr) override { return false; } // TODO
   virtual void freeImpl(void *Ptr) override;
   cl::Context *get();
+  bool supportsCommandBuffers() { return SupportsCommandBuffers; }
+  bool supportsCommandBuffersSVM() { return SupportsCommandBuffersSVM; }
+  bool supportsCommandBuffersHost() { return SupportsCommandBuffersHost; }
+  const CHIPContextClExts *exts() { return &Exts_; }
 
   size_t getNumAllocations() const { return MemManager_.getNumAllocations(); }
   IteratorRange<const_alloc_iterator> getAllocPointers() const {
@@ -445,6 +480,11 @@ public:
   virtual std::shared_ptr<chipstar::Event>
   memPrefetchImpl(const void *Ptr, size_t Count) override;
 
+  virtual std::shared_ptr<chipstar::Event>
+  enqueueNativeGraph(chipstar::CHIPGraphNative *NativeGraph) override;
+  virtual chipstar::CHIPGraphNative *createNativeGraph() override;
+  virtual void destroyNativeGraph(chipstar::CHIPGraphNative *NativeGraph) override;
+
   /// Enqueues a virtual command that deletes the give host array
   /// after previously enqueud commands have finished.
   ///
@@ -504,6 +544,10 @@ public:
   CHIPModuleOpenCL *getModule() override { return Module; }
   const CHIPModuleOpenCL *getModule() const override { return Module; }
   virtual hipError_t getAttributes(hipFuncAttributes *Attr) override;
+  cl_kernel getKernelHandle() {
+        auto BorrowedKernel = borrowUniqueKernelHandle();
+        return (*BorrowedKernel)();  // Get raw cl_kernel handle
+    }
 
   CHIPContextOpenCL *getContext() {
     assert(Device);
@@ -540,6 +584,7 @@ public:
 
   virtual ~CHIPExecItemOpenCL() override {}
   virtual void setupAllArgs() override;
+  virtual void copyArgs(void** args) override;
   cl_kernel getKernelHandle();
 
   virtual chipstar::ExecItem *clone() const override {
@@ -606,5 +651,52 @@ public:
   cl_mem getImage() const { return Image; }
   cl_sampler getSampler() const { return Sampler; }
 };
+
+class CHIPGraphNativeOpenCL : public chipstar::CHIPGraphNative {
+  cl_command_buffer_khr Handle_;
+  cl_command_queue CmdQ_;
+  std::map<CHIPGraphNode *, cl_sync_point_khr> SyncPointMap_;
+  const CHIPContextClExts *Exts_;
+
+  bool addKernelNode(CHIPGraphNodeKernel *Node,
+                     std::vector<cl_sync_point_khr> &SyncPointDeps,
+                     cl_sync_point_khr *SyncPoint);
+#ifdef cl_pocl_command_buffer_svm
+  bool addMemcpyNode(CHIPGraphNodeMemcpy *Node,
+                     std::vector<cl_sync_point_khr> &SyncPointDeps,
+                     cl_sync_point_khr *SyncPoint);
+  bool addMemcpyNode(CHIPGraphNodeMemcpyFromSymbol *Node,
+                     std::vector<cl_sync_point_khr> &SyncPointDeps,
+                     cl_sync_point_khr *SyncPoint);
+  bool addMemcpyNode(CHIPGraphNodeMemcpyToSymbol *Node,
+                     std::vector<cl_sync_point_khr> &SyncPointDeps,
+                     cl_sync_point_khr *SyncPoint);
+  bool addMemsetNode(CHIPGraphNodeMemset *Node,
+                     std::vector<cl_sync_point_khr> &SyncPointDeps,
+                     cl_sync_point_khr *SyncPoint);
+#endif
+
+#ifdef cl_pocl_command_buffer_host_exec
+  bool addHostNode(CHIPGraphNodeHost *Node,
+                   std::vector<cl_sync_point_khr> &SyncPointDeps,
+                   cl_sync_point_khr *SyncPoint);
+  bool addEventRecordNode(CHIPGraphNodeEventRecord *Node,
+                          std::vector<cl_sync_point_khr> &SyncPointDeps,
+                          cl_sync_point_khr *SyncPoint);
+  bool addEventWaitNode(CHIPGraphNodeWaitEvent *Node,
+                        std::vector<cl_sync_point_khr> &SyncPointDeps,
+                        cl_sync_point_khr *SyncPoint);
+#endif
+
+public:
+  CHIPGraphNativeOpenCL(cl_command_buffer_khr H, cl_command_queue CQ,
+                        const CHIPContextClExts *E)
+      : Handle_(H), CmdQ_(CQ), Exts_(E) {}
+  virtual ~CHIPGraphNativeOpenCL();
+  cl_command_buffer_khr get() const { return Handle_; }
+  virtual bool finalize() override;
+  virtual bool addNode(CHIPGraphNode *NewNode) override;
+};
+
 
 #endif

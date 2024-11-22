@@ -2632,6 +2632,11 @@ void CHIPExecItemLevel0::setupAllArgs() {
   return;
 }
 
+void CHIPExecItemLevel0::copyArgs(void** args) {
+    Args_ = args;
+    ArgsSetup = false;
+}
+
 void CHIPExecItemLevel0::setKernel(chipstar::Kernel *Kernel) {
   ChipKernel_ = static_cast<CHIPKernelLevel0 *>(Kernel);
 }
