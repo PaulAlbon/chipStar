@@ -45,6 +45,8 @@
 #include "macros.hh"
 #include "CHIPException.hh"
 #include <utility>
+#include <variant>
+#include <deque>
 
 #include "SPVRegister.hh"
 
@@ -2088,17 +2090,152 @@ public:
  * @brief Queue class for submitting kernels to for execution
  */
 class Queue : public ihipStream_t {
+public:
+  enum MEM_MAP_TYPE { HOST_READ, HOST_WRITE, HOST_READ_WRITE };
+
 protected:
   struct MemCopyArgs {
-        void* dst;
-        const void* src;
-        size_t size;
-        hipMemcpyKind kind;
+        void* Dst;
+        const void* Src;
+        size_t Size;
+        hipMemcpyKind Kind;
         
         MemCopyArgs(void* d, const void* s, size_t sz, hipMemcpyKind k)
-            : dst(d), src(s), size(sz), kind(k) {}
+            : Dst(d), Src(s), Size(sz), Kind(k) {}
   };
-  std::deque<MemCopyArgs> ArgQueue;
+
+  struct MemCopy2DArgs {
+    void* Dst;
+    size_t DPitch;
+    const void* Src;
+    size_t SPitch;
+    size_t Width;
+    size_t Height;
+    hipMemcpyKind Kind;
+
+    MemCopy2DArgs(void* d, size_t dp, const void* s, size_t sp, size_t w, size_t h, hipMemcpyKind k)
+        : Dst(d), DPitch(dp), Src(s), SPitch(sp), Width(w), Height(h), Kind(k) {}
+  };
+
+  struct MemCopy3DArgs {
+    void* Dst;
+    size_t DPitch;
+    size_t DSPitch;
+    const void* Src;
+    size_t SPitch;
+    size_t SSPitch;
+    size_t Width;
+    size_t Height;
+    size_t Depth;
+    hipMemcpyKind Kind;
+
+    MemCopy3DArgs(void* d, size_t dp, size_t dsp, const void* s, size_t sp, size_t ssp, size_t w, size_t h, size_t depth, hipMemcpyKind k)
+        : Dst(d), DPitch(dp), DSPitch(dsp), Src(s), SPitch(sp), SSPitch(ssp), Width(w), Height(h), Depth(depth), Kind(k) {}
+  };
+
+  struct MemFillArgs {
+    void* Dst;
+    size_t Size;
+    const void* Pattern;
+    size_t PatternSize;
+
+    MemFillArgs(void* d, size_t s, const void* p, size_t ps)
+        : Dst(d), Size(s), Pattern(p), PatternSize(ps) {}
+  };
+
+  struct MemFill2DArgs {
+    void* Dst;
+    size_t Pitch;
+    int Value;
+    size_t Width;
+    size_t Height;
+
+    MemFill2DArgs(void* d, size_t p, int v, size_t w, size_t h)
+        : Dst(d), Pitch(p), Value(v), Width(w), Height(h) {}
+  };
+
+  struct MemFill3DArgs {
+    hipPitchedPtr PitchedDevPtr;
+    int Value;
+    hipExtent Extent;
+
+    MemFill3DArgs(hipPitchedPtr p, int v, hipExtent e)
+        : PitchedDevPtr(p), Value(v), Extent(e) {}
+  };
+
+  struct MemPrefetchArgs {
+    const void* Ptr;
+    size_t Count;
+
+    MemPrefetchArgs(const void* p, size_t c)
+        : Ptr(p), Count(c) {}
+  };
+
+  struct MemMapArgs {
+    const chipstar::AllocationInfo* AllocInfo;
+    MEM_MAP_TYPE MapType;
+
+    MemMapArgs(const chipstar::AllocationInfo* ai, MEM_MAP_TYPE mt)
+        : AllocInfo(ai), MapType(mt) {}
+  };
+
+  struct MemUnmapArgs {
+    const chipstar::AllocationInfo* AllocInfo;
+
+    MemUnmapArgs(const chipstar::AllocationInfo* ai)
+        : AllocInfo(ai) {}
+  };
+
+  struct ExecItemLaunchArgs {
+    chipstar::ExecItem* ExecItem;
+
+    ExecItemLaunchArgs(chipstar::ExecItem* ei)
+        : ExecItem(ei) {}
+  };
+
+  struct KernelLaunchArgs {
+    chipstar::Kernel* ChipKernel;
+    dim3 NumBlocks;
+    dim3 DimBlocks;
+    std::vector<void*> Args; // Copy of the args array
+    size_t SharedMemBytes;
+
+    KernelLaunchArgs(chipstar::Kernel* k, dim3 nb, dim3 db, std::vector<void*> a, size_t sm)
+        : ChipKernel(k), NumBlocks(nb), DimBlocks(db), Args(a), SharedMemBytes(sm) {}
+  };
+
+  struct EventRecordArgs {
+    chipstar::Event* Event;
+
+    EventRecordArgs(chipstar::Event* e)
+        : Event(e) {}
+  };
+
+  struct EventBarrierArgs {
+    std::vector<std::shared_ptr<chipstar::Event>> EventsToWaitFor;
+
+    EventBarrierArgs(std::vector<std::shared_ptr<chipstar::Event>> e)
+        : EventsToWaitFor(e) {}
+  };
+
+  struct CallbackArgs {
+    hipStreamCallback_t Callback;
+    void* UserData;
+
+    CallbackArgs(hipStreamCallback_t c, void* u)
+        : Callback(c), UserData(u) {}
+  };
+
+  std::deque<std::variant<
+        MemCopyArgs, MemCopy2DArgs, MemCopy3DArgs,
+        MemFillArgs, MemFill2DArgs, MemFill3DArgs,
+        MemPrefetchArgs,
+        MemMapArgs, MemUnmapArgs,
+        KernelLaunchArgs,
+        ExecItemLaunchArgs,
+        EventRecordArgs, EventBarrierArgs,
+        CallbackArgs
+    >> ArgQueue;
 
   hipStreamCaptureStatus CaptureStatus_ = hipStreamCaptureStatusNone;
   hipStreamCaptureMode CaptureMode_ = hipStreamCaptureModeGlobal;
@@ -2134,17 +2271,156 @@ protected:
 public:
   /// @brief Get the host/device timestamps and copy them to the event.
   /// @param Event The event to update.
-  virtual void memCopyEnqueue(void* dst, const void* src, size_t size, 
-                               hipMemcpyKind kind) {
-    ArgQueue.emplace_back(dst, src, size, kind);
+  virtual void launchKernelEnqueue(chipstar::Kernel* ChipKernel, dim3 NumBlocks,
+                            dim3 DimBlocks, void** Args, size_t SharedMemBytes) {
+    // Copy the args array to ensure we own the data
+    std::vector<void*> ArgsCopy;
+    if (Args) {
+        size_t NumArgs = ChipKernel->getFuncInfo()->getNumClientArgs();
+        ArgsCopy.assign(Args, Args + NumArgs);
+    }
+    ArgQueue.emplace_back(KernelLaunchArgs{ChipKernel, NumBlocks, DimBlocks, 
+                                       std::move(ArgsCopy), SharedMemBytes});
   }
-  
+
+  void launchExecItemEnqueue(chipstar::ExecItem* ExecItem) {
+    ArgQueue.emplace_back(ExecItemLaunchArgs{ExecItem});
+  }
+
+  virtual void enqueueBarrierEnqueue(const std::vector<std::shared_ptr<chipstar::Event>>& EventsToWaitFor) {
+    ArgQueue.emplace_back(EventBarrierArgs{EventsToWaitFor});
+  }
+
+  virtual void enqueueMarkerEnqueue() {
+    ArgQueue.emplace_back(EventRecordArgs{nullptr});
+  }
+
+  virtual void recordEventEnqueue(chipstar::Event* Event) {
+    ArgQueue.emplace_back(EventRecordArgs{Event});
+  }
+
+  virtual void addCallbackEnqueue(hipStreamCallback_t Callback, void* UserData) {
+    ArgQueue.emplace_back(CallbackArgs{Callback, UserData});
+  }
+
+  virtual void memCopyEnqueue(void* Dst, const void* Src, size_t Size, 
+                               hipMemcpyKind Kind) {
+    ArgQueue.emplace_back(MemCopyArgs{Dst, Src, Size, Kind});
+  }
+
+  virtual void memCopyAsync2DEnqueue(void* Dst, size_t DPitch, const void* Src, size_t SPitch, 
+                              size_t Width, size_t Height, hipMemcpyKind Kind) {
+    ArgQueue.emplace_back(MemCopy2DArgs{Dst, DPitch, Src, SPitch, Width, Height, Kind});
+  }
+
+  virtual void memCopy2DEnqueue(void* Dst, size_t DPitch, const void* Src, size_t SPitch,
+                         size_t Width, size_t Height, hipMemcpyKind Kind) {
+    ArgQueue.emplace_back(MemCopy2DArgs{Dst, DPitch, Src, SPitch, Width, Height, Kind});
+  }
+
+  virtual void memCopy3DAsyncEnqueue(void* Dst, size_t DPitch, size_t DSPitch, const void* Src,
+                              size_t SPitch, size_t SSPitch, size_t Width, size_t Height,
+                              size_t Depth, hipMemcpyKind Kind) {
+    ArgQueue.emplace_back(MemCopy3DArgs{Dst, DPitch, DSPitch, Src, SPitch, SSPitch,
+                          Width, Height, Depth, Kind});
+  }
+
+  virtual void memFillEnqueue(void* Dst, size_t Size, const void* Pattern, size_t PatternSize) {
+    ArgQueue.emplace_back(MemFillArgs{Dst, Size, Pattern, PatternSize});
+  }
+
+  virtual void memFillAsyncEnqueue(void* Dst, size_t Size, const void* Pattern, size_t PatternSize) {
+    ArgQueue.emplace_back(MemFillArgs{Dst, Size, Pattern, PatternSize});
+  }
+
+  virtual void memFillAsync2DEnqueue(void* Dst, size_t Pitch, int Value, size_t Width, size_t Height) {
+    ArgQueue.emplace_back(MemFill2DArgs{Dst, Pitch, Value, Width, Height});
+  }
+
+  virtual void memFillAsync3DEnqueue(hipPitchedPtr PitchedDevPtr, int Value, hipExtent Extent) {
+    ArgQueue.emplace_back(MemFill3DArgs{PitchedDevPtr, Value, Extent});
+  }
+
+  virtual void memPrefetchEnqueue(const void* Ptr, size_t Count) {
+    ArgQueue.emplace_back(MemPrefetchArgs{Ptr, Count});
+  }
+
+  virtual void memMapEnqueue(const chipstar::AllocationInfo* AllocInfo, MEM_MAP_TYPE MapType) {
+    ArgQueue.emplace_back(MemMapArgs{AllocInfo, MapType});
+  }
+
+  virtual void memUnmapEnqueue(const chipstar::AllocationInfo* AllocInfo) {
+    ArgQueue.emplace_back(MemUnmapArgs{AllocInfo});
+  }
+
   virtual hipError_t execute() {
-    // Default implementation: process stored commands
     while (!ArgQueue.empty()) {
-        auto args = ArgQueue.front();
-        ArgQueue.pop_front();
-        memCopyAsyncImpl(args.dst, args.src, args.size, args.kind);
+      struct QueueOpVisitor {
+        chipstar::Queue* queue;
+        
+        void operator()(const MemCopyArgs& arg) {
+            queue->memCopyAsync(arg.Dst, arg.Src, arg.Size, arg.Kind);
+        }
+        
+        void operator()(const MemCopy2DArgs& arg) {
+            queue->memCopyAsync2D(arg.Dst, arg.DPitch, arg.Src, arg.SPitch,
+                                arg.Width, arg.Height, arg.Kind);
+        }
+
+        void operator()(const MemCopy3DArgs& arg) {
+            queue->memCopy3DAsync(arg.Dst, arg.DPitch, arg.DSPitch, arg.Src,
+                                arg.SPitch, arg.SSPitch, arg.Width, arg.Height,
+                                arg.Depth, arg.Kind);
+        }
+
+        void operator()(const MemFillArgs& arg) {
+            queue->memFillAsync(arg.Dst, arg.Size, arg.Pattern, arg.PatternSize);
+        }
+        void operator()(const MemFill2DArgs& arg) {
+            queue->memFillAsync2D(arg.Dst, arg.Pitch, arg.Value,
+                                arg.Width, arg.Height);
+        }
+        void operator()(const MemFill3DArgs& arg) {
+            queue->memFillAsync3D(arg.PitchedDevPtr, arg.Value, arg.Extent);
+        }
+
+        void operator()(const MemMapArgs& arg) {
+            queue->MemMap(arg.AllocInfo, arg.MapType);
+        }
+        void operator()(const MemUnmapArgs& arg) {
+              queue->MemUnmap(arg.AllocInfo);
+        }
+
+        void operator()(const MemPrefetchArgs& arg) {
+            queue->memPrefetch(arg.Ptr, arg.Count);
+        }
+
+        void operator()(const KernelLaunchArgs& arg) {
+            queue->launchKernel(arg.ChipKernel, arg.NumBlocks, arg.DimBlocks,
+                                const_cast<void**>(arg.Args.data()), arg.SharedMemBytes);
+        }
+        void operator()(const ExecItemLaunchArgs& arg) {
+              queue->launch(arg.ExecItem);
+        }
+
+        void operator()(const EventRecordArgs& arg) {
+            if (arg.Event)
+                queue->recordEvent(arg.Event);
+            else
+                  queue->enqueueMarker();
+        }
+        void operator()(const EventBarrierArgs& arg) {
+            queue->enqueueBarrier(arg.EventsToWaitFor);
+        }
+        void operator()(const CallbackArgs& arg) {
+            queue->addCallback(arg.Callback, arg.UserData);
+        }
+      };
+
+      QueueOpVisitor visitor{this};
+      auto& op = ArgQueue.front();
+      std::visit(visitor, op);
+      ArgQueue.pop_front();
     }
     return hipSuccess;
   }
@@ -2160,7 +2436,6 @@ public:
   std::pair<SharedEventVector, LockGuardVector>
   getSyncQueuesLastEvents(std::shared_ptr<chipstar::Event> LastEvent,
                           bool IncludeSelfLastEvent);
-  enum MEM_MAP_TYPE { HOST_READ, HOST_WRITE, HOST_READ_WRITE };
   virtual void MemMap(const chipstar::AllocationInfo *AllocInfo,
                       MEM_MAP_TYPE MapType) {}
   virtual void MemUnmap(const chipstar::AllocationInfo *AllocInfo) {}

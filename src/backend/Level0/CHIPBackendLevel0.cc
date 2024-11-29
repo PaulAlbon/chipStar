@@ -335,6 +335,99 @@ CHIPEventLevel0::CHIPEventLevel0(CHIPContextLevel0 *ChipCtx,
     : chipstar::Event((chipstar::Context *)(ChipCtx)), Event_(NativeEvent),
       EventPoolHandle_(nullptr), EventPoolIndex(0) {}
 
+hipError_t CHIPQueueLevel0::execute() {
+
+    logDebug("Level0 execute() START HasPendingCommands={}", HasPendingCommands());
+
+    auto Status = Queue::execute();
+    if (Status != hipSuccess) {
+        logError("Base Queue::execute() failed with status {}", Status);
+        return Status;
+    }
+
+    if (HasPendingCommands()) {
+        logDebug("Getting command list");
+        Borrowed<FencedCmdList> CommandList = ChipCtxLz_->getCmdListReg();
+        if (!CommandList) {
+            logError("Failed to get command list");
+            return hipErrorInvalidValue;
+        }
+
+        logDebug("Creating event");
+        auto Event = Backend->createEventShared(static_cast<chipstar::Context*>(ChipCtxLz_));
+        if (!Event) {
+            logError("Failed to create event");
+            return hipErrorInvalidValue;
+        }
+        Event->Msg = "execute";
+
+        logDebug("Executing command list");
+        try {
+            executeCommandList(CommandList, Event);
+        } catch (const std::exception& e) {
+            logError("Command list execution failed: {}", e.what());
+            return hipErrorLaunchFailure;
+        }
+        
+        logDebug("Command list executed, setting pending commands to false");
+        setPendingCommands(false);
+
+        logDebug("Waiting for event with timeout (180s)");
+        constexpr uint32_t TIMEOUT_MS = 180000;
+        auto start = std::chrono::steady_clock::now();
+        uint32_t last_logged = 0;
+        
+        uint32_t reset_attempts = 0;
+        constexpr uint32_t MAX_RESET_ATTEMPTS = 3;
+        
+        while (!Event->wait()) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
+            auto elapsed_ms = elapsed.count();
+            
+            if (elapsed_ms / 1000 > last_logged) {
+                last_logged = elapsed_ms / 1000;
+                ze_result_t fenceStatus = ZE_RESULT_NOT_READY;
+                if (ZeFenceLast_) {
+                    fenceStatus = zeFenceQueryStatus(ZeFenceLast_);
+                }
+                logDebug("Still waiting... {} seconds elapsed, fence status: {}, event msg: {}", 
+                        last_logged, static_cast<int>(fenceStatus), Event->Msg);
+
+                if (elapsed_ms > 30000 && fenceStatus == ZE_RESULT_NOT_READY && 
+                    reset_attempts < MAX_RESET_ATTEMPTS) {
+                    logDebug("Attempting to reset command queue (attempt {}/{})", 
+                             reset_attempts + 1, MAX_RESET_ATTEMPTS);
+                    
+                    auto cmdQueue = getCmdQueue();
+                    if (cmdQueue) {
+                        zeCommandQueueSynchronize(cmdQueue, UINT64_MAX);
+                    }
+                    
+                    reset_attempts++;
+                    start = std::chrono::steady_clock::now();
+                }
+            }
+            
+            if (elapsed_ms > TIMEOUT_MS) {
+                ze_result_t finalFenceStatus = ZE_RESULT_NOT_READY;
+                if (ZeFenceLast_) {
+                    finalFenceStatus = zeFenceQueryStatus(ZeFenceLast_);
+                }
+                logError("Event wait timed out after {} seconds, final fence status: {}, reset attempts: {}", 
+                        elapsed_ms/1000, static_cast<int>(finalFenceStatus), reset_attempts);
+                return hipErrorLaunchTimeOut;
+            }
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        logDebug("Event wait completed successfully");
+    }
+
+    logDebug("Level0 execute() END");
+    return hipSuccess;
+}
+
 void CHIPQueueLevel0::recordEvent(chipstar::Event *ChipEvent) {
   auto ChipEventLz = static_cast<CHIPEventLevel0 *>(ChipEvent);
 
@@ -1503,16 +1596,39 @@ void CHIPQueueLevel0::finish() {
 
 void CHIPQueueLevel0::executeCommandList(
     Borrowed<FencedCmdList> &CmdList, std::shared_ptr<chipstar::Event> Event) {
+  logDebug("executeCommandList START");
   updateLastEvent(Event);
 
-  CmdList->execute(getCmdQueue()); // creates fence
-  ZeFenceLast_ = CmdList->getFence();
-  assert(ZeFenceLast_ && "Fence pointer is null");
+  try {
+    CmdList->execute(getCmdQueue()); // creates fence
+    ZeFenceLast_ = CmdList->getFence();
+    
+    if (!ZeFenceLast_) {
+      logError("Failed to get fence after command list execution");
+      throw std::runtime_error("Fence creation failed");
+    }
+    
+    logDebug("Command list executed, fence created");
 
-  auto BackendLz = static_cast<CHIPBackendLevel0 *>(Backend);
-  LOCK(BackendLz->ActiveCmdListsMtx);
-  BackendLz->ActiveCmdLists.push_back(std::move(CmdList));
-  Backend->trackEvent(Event);
+    auto BackendLz = static_cast<CHIPBackendLevel0 *>(Backend);
+    {
+      LOCK(BackendLz->ActiveCmdListsMtx);
+      logDebug("Adding command list to active list");
+      BackendLz->ActiveCmdLists.push_back(std::move(CmdList));
+    }
+    
+    logDebug("Tracking event");
+    Backend->trackEvent(Event);
+    
+    // Check initial fence status
+    ze_result_t fenceStatus = zeFenceQueryStatus(ZeFenceLast_);
+    logDebug("Initial fence status: {}", static_cast<int>(fenceStatus));
+    
+  } catch (const std::exception& e) {
+    logError("Exception in executeCommandList: {}", e.what());
+    throw;
+  }
+  logDebug("executeCommandList END");
 }
 
 void CHIPQueueLevel0::executeCommandList(

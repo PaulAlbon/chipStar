@@ -256,6 +256,7 @@ protected:
   CHIPDeviceLevel0 *ChipDevLz_;
   CHIPContextLevel0 *ChipCtxLz_;
   ze_fence_handle_t ZeFenceLast_ = nullptr;
+  bool HasPendingCommands_ = false;
 
   // The shared memory buffer
   void *SharedBuf_;
@@ -288,6 +289,9 @@ protected:
   void initializeCmdListImm();
 
 public:
+  void setPendingCommands(bool HasCommands) { HasPendingCommands_ = HasCommands; }
+  bool HasPendingCommands() { return HasPendingCommands_; } 
+
   virtual void memCopyEnqueue(void* dst, const void* src, size_t size,
                                hipMemcpyKind kind) override {
     if (!EnqueuedCmdList)
@@ -296,16 +300,11 @@ public:
     zeCommandListAppendMemoryCopy(
         EnqueuedCmdList->getCmdList(),
         dst, src, size, nullptr, 0, nullptr);
+
+    setPendingCommands(true);
   }
 
-  virtual hipError_t execute() override {
-    if (!EnqueuedCmdList)
-        return hipSuccess;
-
-    EnqueuedCmdList->execute(ZeCmdQ_);
-    EnqueuedCmdList.reset();
-    return hipSuccess;
-  }
+  virtual hipError_t execute() override;
 
   void recordEvent(chipstar::Event *ChipEvent) override;
   std::mutex CommandListMtx; /// prevent simultaneous access to ZeCmdListImm_
